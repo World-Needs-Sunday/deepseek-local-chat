@@ -61,3 +61,8 @@ DeepSeek 本地助手 —— 使用说明
     公式输出更稳定。
   - 两个版本共用同一套本地聊天数据（同一浏览器下 localStorage 共享），
     切换使用不会丢失记录。
+  - 压缩包已按版本分开：
+    「DeepSeek本地助手-轻量版.zip」只含轻量版；
+    「DeepSeek本地助手-完整版.zip」含完整版与 libs 样式库。
+  - 线上静态站默认打开完整版：
+    https://world-needs-sunday.github.io/deepseek-local-chat/
