@@ -145,6 +145,15 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 /* 用户图片 */
 .msg-imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .msg-imgs img{max-width:180px;max-height:180px;border-radius:8px;border:1px solid var(--border);cursor:zoom-in;object-fit:cover}
+.msg-files{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-width:440px}
+.file-card{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:8px;padding:7px 10px;background:#fff;cursor:pointer;font-size:13px}
+.file-card:hover{border-color:var(--accent)}
+.file-card .f-ico{color:var(--accent);flex-shrink:0;display:flex}
+.file-card .f-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-card .f-size{color:var(--text3);font-size:11.5px;flex-shrink:0}
+.file-card .f-badge{background:var(--accent-weak);color:var(--accent);font-size:11px;padding:1px 6px;border-radius:4px;flex-shrink:0;text-transform:uppercase}
+.file-body{display:none;margin:0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fafbfc;font-family:Consolas,Menlo,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow:auto}
+.file-body.open{display:block}
 
 /* 空状态 */
 #empty-state{text-align:center;padding:80px 20px 40px;color:var(--text2)}
@@ -164,6 +173,10 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 .att-item img{width:100%;height:100%;object-fit:cover;border-radius:8px;border:1px solid var(--border)}
 .att-item .att-rm{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;background:#333;color:#fff;font-size:11px;line-height:18px;text-align:center}
 .att-item .att-rm:hover{background:var(--danger)}
+.att-file{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:8px;padding:5px 8px 5px 10px;background:#fff;max-width:240px}
+.att-file .af-name{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att-file .af-rm{width:17px;height:17px;border-radius:50%;background:#333;color:#fff;font-size:10px;line-height:17px;text-align:center;flex-shrink:0}
+.att-file .af-rm:hover{background:var(--danger)}
 #input-box{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--border2);border-radius:14px;padding:10px 10px 10px 14px;transition:border-color .15s,box-shadow .15s}
 #input-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,107,254,.1)}
 #msg-input{flex:1;border:none;outline:none;resize:none;max-height:180px;line-height:1.6;background:none;padding:3px 0}
@@ -288,7 +301,7 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
       <div id="composer-wrap">
         <div id="attach-preview"></div>
         <div id="input-box">
-          <button id="attach-btn" title="上传图片（也可直接粘贴截图）">
+          <button id="attach-btn" title="上传图片或文本/代码文件（也可直接粘贴截图）">
             <svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/><circle cx="5.5" cy="6.5" r="1.4" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 11.5l3.8-3.8 2.5 2.5 2-2 2.7 2.7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <textarea id="msg-input" rows="1" placeholder="给 DeepSeek 发送消息（Enter 发送，Shift+Enter 换行）"></textarea>
@@ -331,7 +344,7 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 
 <div id="lightbox"><img id="lightbox-img" alt=""></div>
 <div id="toast-wrap"></div>
-<input type="file" id="file-input" accept="image/*" multiple hidden>
+<input type="file" id="file-input" accept="image/*,.txt,.md,.markdown,.cpp,.c,.h,.hpp,.cc,.js,.mjs,.ts,.jsx,.tsx,.py,.java,.kt,.json,.csv,.tsv,.html,.htm,.css,.xml,.yml,.yaml,.ini,.cfg,.log,.sh,.bat,.ps1,.sql,.go,.rs,.php,.rb,.lua,.toml,.vue,.r,.tex,.ipynb" multiple hidden>
 <input type="file" id="import-input" accept=".json,application/json" hidden>
 
 <script>
@@ -363,6 +376,10 @@ var settings = loadSettings();
 var convs = loadConvs();
 var currentId = safeGet(LS.cur) || null;
 var pendingImages = [];   // 待发送图片 dataURL
+var pendingFiles = [];    // 待发送文本文件 {name,size,content,truncated}
+var FILE_TEXT_EXTS = { txt:'', md:'markdown', markdown:'markdown', cpp:'cpp', c:'c', h:'c', hpp:'cpp', cc:'cpp', js:'javascript', mjs:'javascript', ts:'typescript', jsx:'jsx', tsx:'tsx', py:'python', java:'java', kt:'kotlin', json:'json', csv:'', tsv:'', html:'html', htm:'html', css:'css', xml:'xml', yml:'yaml', yaml:'yaml', ini:'ini', cfg:'ini', log:'', sh:'bash', bat:'bat', ps1:'powershell', sql:'sql', go:'go', rs:'rust', php:'php', rb:'ruby', lua:'lua', toml:'toml', vue:'vue', r:'r', tex:'latex', ipynb:'json' };
+var FILE_READ_MAX = 10 * 1024 * 1024;   // 文件读取上限 10MB
+var FILE_CONTENT_MAX = 50000;           // 单个文件纳入上下文的最大字符数
 var streaming = false;
 var activeAbort = null;
 var liveEls = {};         // 流式消息的 DOM 引用
@@ -459,6 +476,7 @@ function convToMarkdown(c){
       lines.push('## 我');
       if (m.content) lines.push(m.content);
       if (m.images && m.images.length) lines.push('*（含 ' + m.images.length + ' 张图片，图片未包含在导出文件中）*');
+      if (m.files && m.files.length) lines.push('*（含 ' + m.files.length + ' 个文件：' + m.files.map(function(f){ return f.name; }).join('、') + '，文件内容未包含在导出文件中）*');
     } else {
       lines.push('## DeepSeek');
       if (m.reasoning){
@@ -525,6 +543,11 @@ function importConvsFromJSON(text){
       if (m.role === 'user' && Array.isArray(m.images)){
         nm.images = m.images.filter(function(x){ return typeof x === 'string' && x.indexOf('data:image/') === 0; });
       }
+      if (m.role === 'user' && Array.isArray(m.files)){
+        nm.files = m.files.filter(function(x){ return x && typeof x.name === 'string' && typeof x.content === 'string'; })
+          .slice(0, 4)
+          .map(function(x){ return { name: x.name.slice(0, 120), size: (typeof x.size === 'number') ? x.size : 0, content: x.content.slice(0, FILE_CONTENT_MAX), truncated: !!x.truncated }; });
+      }
       if (m.role === 'assistant'){
         if (typeof m.reasoning === 'string' && m.reasoning) nm.reasoning = m.reasoning;
         if (Array.isArray(m.sources) && m.sources.length) nm.sources = m.sources.slice(0, 10);
@@ -533,7 +556,7 @@ function importConvsFromJSON(text){
         if (typeof m.model === 'string' && m.model) nm.model = m.model;
         nm.status = 'done';
       }
-      if (!nm.content && !(nm.images && nm.images.length) && !nm.reasoning) continue;
+      if (!nm.content && !(nm.images && nm.images.length) && !(nm.files && nm.files.length) && !nm.reasoning) continue;
       msgs.push(nm);
     }
     valid.push({
@@ -716,20 +739,55 @@ function compressImage(dataUrl){
     return canvas.toDataURL('image/jpeg', 0.85);
   }).catch(function(){ return dataUrl; });
 }
-async function addImages(files){
+function fileExt(name){
+  var m = /\.([A-Za-z0-9]+)$/.exec(name || '');
+  return m ? m[1].toLowerCase() : '';
+}
+function fmtSize(n){
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/1024/1024).toFixed(1) + ' MB';
+}
+function readFileText(file){
+  return new Promise(function(resolve, reject){
+    var fr = new FileReader();
+    fr.onload = function(){ resolve(String(fr.result)); };
+    fr.onerror = reject;
+    fr.readAsText(file);
+  });
+}
+async function addAttachments(files){
   var list = Array.prototype.slice.call(files || []);
   for (var i=0;i<list.length;i++){
-    if (pendingImages.length >= 4){ toast('最多同时发送 4 张图片'); break; }
     var f = list[i];
-    if (!f.type || f.type.indexOf('image/') !== 0) continue;
-    if (f.size > 30*1024*1024){ toast('图片过大（超过 30MB）'); continue; }
+    if (!f) continue;
+    var isImage = f.type && f.type.indexOf('image/') === 0;
+    if (isImage){
+      if (pendingImages.length >= 4){ toast('最多同时发送 4 张图片'); continue; }
+      if (f.size > 30*1024*1024){ toast('图片过大（超过 30MB）：' + f.name); continue; }
+      try {
+        var raw = await fileToDataURL(f);
+        var compressed = await compressImage(raw);
+        pendingImages.push(compressed);
+        renderAttachPreview();
+      } catch(e){ toast('图片读取失败：' + f.name); }
+      continue;
+    }
+    var ext = fileExt(f.name);
+    if (!(ext in FILE_TEXT_EXTS)){ toast('不支持的文件类型：' + (ext ? '.'+ext : f.name)); continue; }
+    if (f.size > FILE_READ_MAX){ toast('文件过大（超过 10MB）：' + f.name); continue; }
+    if (pendingFiles.length >= 4){ toast('最多同时发送 4 个文件'); break; }
     try {
-      var raw = await fileToDataURL(f);
-      var compressed = await compressImage(raw);
-      pendingImages.push(compressed);
+      var text = await readFileText(f);
+      if (text.indexOf('\u0000') >= 0){ toast('不是文本文件：' + f.name); continue; }
+      if (!text.trim()){ toast('文件内容为空：' + f.name); continue; }
+      var truncated = text.length > FILE_CONTENT_MAX;
+      if (truncated) text = text.slice(0, FILE_CONTENT_MAX);
+      pendingFiles.push({ name: f.name, size: f.size, content: text, truncated: truncated });
       renderAttachPreview();
-    } catch(e){ toast('图片读取失败'); }
+    } catch(e){ toast('文件读取失败：' + f.name); }
   }
+  updateSendEnabled();
 }
 
 /* ---------- API ---------- */
@@ -746,10 +804,22 @@ function toApiMessages(msgs){
     var m = msgs[i];
     if (m.role === 'user'){
       var blocks = [];
-      if (m.content) blocks.push({ type:'text', text:m.content });
+      var textParts = [];
+      if (m.content) textParts.push(m.content);
+      var files = m.files || [];
+      if (files.length){
+        var sec = [];
+        for (var f=0;f<files.length;f++){
+          var fl = files[f];
+          var lang = FILE_TEXT_EXTS[fileExt(fl.name)] || '';
+          sec.push('【附件文件 '+(f+1)+'】' + fl.name + (fl.truncated ? '（内容过长，已截断）' : '') + '\n```' + lang + '\n' + fl.content + '\n```');
+        }
+        textParts.push(sec.join('\n\n'));
+      }
+      if (textParts.length) blocks.push({ type:'text', text: textParts.join('\n\n') });
       var imgs = m.images || [];
       for (var j=0;j<imgs.length;j++) blocks.push({ type:'image_url', image_url:{ url: imgs[j] } });
-      arr.push({ role:'user', content: blocks.length === 1 && blocks[0].type === 'text' ? m.content : blocks });
+      arr.push({ role:'user', content: blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks });
     } else {
       if (m.status === 'streaming') continue;
       if (!m.content && !m.reasoning) continue; // 空回复/出错的不进上下文
@@ -836,7 +906,8 @@ async function sendMessage(){
   var conv = ensureConv();
   var text = $('msg-input').value.trim();
   var images = pendingImages.slice();
-  if (!text && !images.length) return;
+  var files = pendingFiles.slice();
+  if (!text && !images.length && !files.length) return;
   if (images.length && images.join('').length > 40*1024*1024){ toast('图片总大小过大，请压缩后再试'); return; }
 
   var model = settings.model;
@@ -851,12 +922,13 @@ async function sendMessage(){
     toast('联网搜索已自动切换到 Flash 模型（Pro 模型搜索效果不佳）');
   }
 
-  var userMsg = { id: uid(), role:'user', content:text, images:images, time:Date.now() };
+  var userMsg = { id: uid(), role:'user', content:text, images:images, files:files, time:Date.now() };
   conv.messages.push(userMsg);
-  if (!conv.title || conv.title === '新对话') conv.title = (text || '图片消息').replace(/\s+/g,' ').slice(0,24);
+  if (!conv.title || conv.title === '新对话') conv.title = (text || (files.length ? files[0].name : '') || '图片消息').replace(/\s+/g,' ').slice(0,24);
   conv.updatedAt = Date.now();
 
   pendingImages = [];
+  pendingFiles = [];
   $('msg-input').value = '';
   renderAttachPreview();
   autosize();
@@ -1055,6 +1127,10 @@ function messageHTML(m){
       + (m.images && m.images.length ? '<div class="msg-imgs">'+m.images.map(function(img){
           return '<img src="'+img+'" alt="" data-full="'+img+'">';
         }).join('')+'</div>' : '')
+      + (m.files && m.files.length ? '<div class="msg-files">'+m.files.map(function(f){
+          var ext = fileExt(f.name);
+          return '<div class="file-card"><span class="f-ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5L12.5 5v9.5h-8.5v-13z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9 1.5V5h3.5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></span><span class="f-name">'+escapeHtml(f.name)+'</span><span class="f-size">'+fmtSize(f.size||0)+'</span>'+(ext?'<span class="f-badge">'+escapeHtml(ext)+'</span>':'')+'</div><pre class="file-body">'+escapeHtml(f.content||'')+'</pre>';
+        }).join('')+'</div>' : '')
       + '</div>'
       + msgActions(m)
       + '</div>';
@@ -1187,7 +1263,7 @@ function updateBusyUI(){
   }
 }
 function updateSendEnabled(){
-  $('send-btn').disabled = !($('msg-input').value.trim() || pendingImages.length);
+  $('send-btn').disabled = !($('msg-input').value.trim() || pendingImages.length || pendingFiles.length);
 }
 function autosize(){
   var ta = $('msg-input');
@@ -1196,10 +1272,14 @@ function autosize(){
 }
 function renderAttachPreview(){
   var wrap = $('attach-preview');
-  if (!pendingImages.length){ wrap.innerHTML = ''; return; }
-  wrap.innerHTML = pendingImages.map(function(img, i){
-    return '<div class="att-item"><img src="'+img+'" alt=""><button class="att-rm" data-ri="'+i+'" title="移除">×</button></div>';
-  }).join('');
+  var parts = [];
+  for (var i=0;i<pendingImages.length;i++){
+    parts.push('<div class="att-item"><img src="'+pendingImages[i]+'" alt=""><button class="att-rm" data-ri="'+i+'" title="移除">×</button></div>');
+  }
+  for (var j=0;j<pendingFiles.length;j++){
+    parts.push('<div class="att-file"><span class="af-name">'+escapeHtml(pendingFiles[j].name)+'</span><button class="af-rm" data-fi="'+j+'" title="移除">×</button></div>');
+  }
+  wrap.innerHTML = parts.join('');
 }
 function newChat(){
   var c = { id: uid(), title:'新对话', createdAt:Date.now(), updatedAt:Date.now(), messages:[] };
@@ -1377,6 +1457,12 @@ function bindEvents(){
       });
       return;
     }
+    var fCard = e.target.closest('.file-card');
+    if (fCard){
+      var fb = fCard.nextElementSibling;
+      if (fb && fb.classList.contains('file-body')) fb.classList.toggle('open');
+      return;
+    }
     var rHead = e.target.closest('.reasoning-head');
     if (rHead){
       var wrap = rHead.closest('.reasoning');
@@ -1430,7 +1516,7 @@ function bindEvents(){
         if (f) files.push(f);
       }
     }
-    if (files.length){ e.preventDefault(); addImages(files); }
+    if (files.length){ e.preventDefault(); addAttachments(files); }
   });
   $('send-btn').addEventListener('click', function(){
     if (streaming){
@@ -1441,15 +1527,23 @@ function bindEvents(){
   });
   $('attach-btn').addEventListener('click', function(){ $('file-input').click(); });
   $('file-input').addEventListener('change', function(){
-    addImages(this.files);
+    addAttachments(this.files);
     this.value = '';
   });
   $('attach-preview').addEventListener('click', function(e){
     var rm = e.target.closest('.att-rm');
-    if (!rm) return;
-    pendingImages.splice(parseInt(rm.getAttribute('data-ri'), 10), 1);
-    renderAttachPreview();
-    updateSendEnabled();
+    if (rm){
+      pendingImages.splice(parseInt(rm.getAttribute('data-ri'), 10), 1);
+      renderAttachPreview();
+      updateSendEnabled();
+      return;
+    }
+    var fr = e.target.closest('.af-rm');
+    if (fr){
+      pendingFiles.splice(parseInt(fr.getAttribute('data-fi'), 10), 1);
+      renderAttachPreview();
+      updateSendEnabled();
+    }
   });
 
   // 弹窗
