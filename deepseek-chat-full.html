@@ -389,6 +389,20 @@ var pendingFiles = [];    // 待发送文本文件 {name,size,content,truncated}
 var FILE_TEXT_EXTS = { txt:'', md:'markdown', markdown:'markdown', cpp:'cpp', c:'c', h:'c', hpp:'cpp', cc:'cpp', js:'javascript', mjs:'javascript', ts:'typescript', jsx:'jsx', tsx:'tsx', py:'python', java:'java', kt:'kotlin', json:'json', csv:'', tsv:'', html:'html', htm:'html', css:'css', xml:'xml', yml:'yaml', yaml:'yaml', ini:'ini', cfg:'ini', log:'', sh:'bash', bat:'bat', ps1:'powershell', sql:'sql', go:'go', rs:'rust', php:'php', rb:'ruby', lua:'lua', toml:'toml', vue:'vue', r:'r', tex:'latex', ipynb:'json' };
 var FILE_READ_MAX = 10 * 1024 * 1024;   // 文件读取上限 10MB
 var FILE_CONTENT_MAX = 50000;           // 单个文件纳入上下文的最大字符数
+
+// 数学公式排版规范：随每轮请求注入，避免 AI 输出导致公式渲染失败
+var RENDER_RULES = [
+  '1. 行内公式用单对 $...$，块级公式用 $$...$$；只允许这两种定界符，不要使用 \\(...\\) 或 \\[...\\]；$ 必须成对出现，行内公式的 $ 与内容之间不要留空格；正文中的货币金额不要用 $（写成"美元"或"5 元"）。',
+  '2. 行内公式里的 & 是 KaTeX 对齐符，必须写成 \\&（如 $nxt\\ \\&\\ mask$）；位运算「与」优先写 \\&\\ 或用文字描述。',
+  '3. \\text{} 内不要使用下划线；确需使用时写成 \\_（如 \\text{\\_\\_builtin\\_clz}），或改为文字表述。',
+  '4. 公式中的绝对值写 \\lvert x \\rvert；不要写 \\|（那是双竖线范数符号）；Markdown 表格单元格内的公式不要出现 |，否则表格会被拆散。',
+  '5. 公式中的百分号是注释符，必须写成 \\%（如 50\\%）。',
+  '6. 公式中的小于/大于号用 \\lt、\\gt；乘号用 \\times 或 \\cdot（不要用 *，易被当成斜体标记）。',
+  '7. 下标必须带花括号：x_{i}；代码、文件名里的下划线放入反引号代码段，不要直接出现在正文中。',
+  '8. 反引号代码段内不要写 LaTeX 公式（代码段内不会渲染公式）；代码与公式分开书写。',
+  '9. 行内公式不要跨行；多行公式请用块级 $$...$$（可配合 \\begin{aligned} 等环境）。',
+  '10. 公式内不要出现 HTML 实体或反引号；复杂公式优先单独成段输出。'
+].join('\n');
 var streaming = false;
 var activeAbort = null;
 var liveEls = {};         // 流式消息的 DOM 引用
@@ -835,6 +849,7 @@ function buildSystemPrompt(){
   var sp = (settings.systemPrompt || '').trim();
   if (sp) parts.push('【用户对 AI 的要求（长期记忆），请在每一轮对话中都严格遵守】\n'+sp);
   parts.push('【环境信息】今天是 '+nowDateStr()+'。当回答涉及"今天、现在、最近"等时间相关问题时，请以该日期时间为准；联网搜索时也请使用该日期。');
+  parts.push('【数学公式排版规范（输出公式时必须严格遵守，否则公式会渲染失败）】\n'+RENDER_RULES);
   return parts.join('\n\n');
 }
 function toApiMessages(msgs){
