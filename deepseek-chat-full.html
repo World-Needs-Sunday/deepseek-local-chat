@@ -224,6 +224,9 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 .md .katex-display{margin:10px 0;overflow-x:auto;overflow-y:hidden;padding:6px 2px}
 .md .katex{font-size:1.06em}
 .codeblock pre code.hljs{background:none;padding:0;font-size:13px;line-height:1.6}
+.md details{margin:8px 0;border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:#fafbfc}
+.md details summary{cursor:pointer;font-weight:600;color:var(--text2);font-size:13.5px}
+.md details[open] summary{margin-bottom:6px}
 
 /* ---------- 超级思考流水线 ---------- */
 .effort-seg.super button[data-v="off"]{display:none}
@@ -427,8 +430,8 @@ var RENDER_RULES = [
   '6. 公式中的小于/大于号用 \\lt、\\gt；乘号用 \\times 或 \\cdot（不要用 *，易被当成斜体标记）。',
   '7. 下标必须带花括号：x_{i}；代码、文件名里的下划线放入反引号代码段，不要直接出现在正文中。',
   '8. 反引号代码段内不要写 LaTeX 公式（代码段内不会渲染公式）；代码与公式分开书写。',
-  '9. 行内公式不要跨行；多行公式请用块级 $$...$$；公式内换行必须写 \\\\（建议配合 \\begin{aligned} 等环境，严禁用 <br> 或裸换行）。',
-  '10. 公式内严禁使用任何 HTML 标签（如 <br>、<sup>）或 HTML 实体，也不要出现反引号；复杂公式优先单独成段输出。'
+  '9. 排版规范：多用标题、分点列表、表格、代码块分层组织内容，段落之间空行分隔；允许使用 <br>、<table>、<b>、<details> 等简单 HTML（可正常渲染，但不要粘贴网页样式与脚本）；行内公式不要跨行，多行公式用块级 $$...$$，公式内换行必须写 \\\\（建议配合 \\begin{aligned} 环境）。',
+  '10. 输出前自查排版：确认标题层级、列表、表格、代码块、公式均规范且能正常渲染，无未闭合或错乱标记；参考来源逐条换行列出，每条一行，不要把网页中的表格标签直接粘进正文。'
 ].join('\n');
 var streaming = false;
 var activeAbort = null;
@@ -660,7 +663,54 @@ function inlineMd(t){
   t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   t = t.replace(/(^|[\s(（])(https?:\/\/[^\s<>"'）)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  // 白名单 HTML 直通：换行、表格与折叠块（normalizeHTML 已清洗为安全形态）
+  t = t.replace(/&lt;(\/?)(table|thead|tbody|tr|td|th|details|summary|br)&gt;/g, '<$1$2>');
   return t;
+}
+// HTML 归一化：把 AI 输出中的常见 HTML 转成可渲染形态（白名单直通 / 转 markdown / 剥壳）
+function normalizeHTML(src){
+  if (!src || src.indexOf('<') < 0) return src;
+  // 换行
+  src = src.replace(/<br\s*\/?>/gi, '\n');
+  // 标题
+  src = src.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, function(m, lv, t){
+    return '\n\n' + '######'.slice(0, +lv) + ' ' + t.replace(/\s+/g, ' ').trim() + '\n\n';
+  });
+  // 列表
+  src = src.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
+  src = src.replace(/<\/?(ul|ol)[^>]*>/gi, '\n');
+  // 行内语义 → markdown 等价
+  src = src.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
+  src = src.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*');
+  src = src.replace(/<(del|s|strike)[^>]*>([\s\S]*?)<\/\1>/gi, '~~$2~~');
+  src = src.replace(/<(u|mark|sub|sup|span|font)[^>]*>([\s\S]*?)<\/\1>/gi, '$2');
+  src = src.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
+  // 链接与图片
+  src = src.replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
+  src = src.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*\/?>/gi, '\n\n![图片]($1)\n\n');
+  // 段落/容器 → 空行分隔
+  src = src.replace(/<\/?(p|div|section|article|blockquote|pre|center|form)[^>]*>/gi, '\n');
+  // 表格与折叠块：白名单直通（仅保留标签名，丢弃属性）
+  src = src.replace(/<(table|thead|tbody|tr|t[dh]|details|summary)\b[^>]*>/gi, function(tag){
+    var m = /^<(\/?)([a-z]+)/i.exec(tag);
+    return '<' + (m[1] || '') + m[2].toLowerCase() + '>';
+  });
+  // 分割线
+  src = src.replace(/<hr\s*\/?>/gi, '\n\n---\n\n');
+  // 其余未知标签剥壳保留内容（白名单表格/折叠块除外；如 <stdio.h> 含特殊字符不会被误伤）
+  src = src.replace(/<\/?(?!(?:table|thead|tbody|tr|td|th|details|summary)\b)[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?\/?>/g, '');
+  // 收敛多余空行
+  src = src.replace(/\n{4,}/g, '\n\n\n');
+  return src;
+}
+// 去除来源标题/摘要中残留的 HTML 标签
+function stripHtml(s){
+  return String(s == null ? '' : s)
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/?(table|thead|tbody|tr|td|th|div|p|span|b|i|em|strong|a|li|ul|ol|h[1-6])\b[^>]*>/gi, '')
+    .replace(/<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?\/?>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 function renderMarkdown(src){
   if (!src) return '';
@@ -669,6 +719,8 @@ function renderMarkdown(src){
     codes.push({ lang: lang||'', code: code.replace(/\n$/,'') });
     return '\u0000C'+(codes.length-1)+'\u0000';
   });
+  // HTML 归一化（在公式提取前，避免破坏公式）
+  src = normalizeHTML(src);
   // 提取数学公式，避免被 Markdown 处理破坏
   var maths = [];
   src = src.replace(/\$\$([\s\S]+?)\$\$/g, function(m, tex){
@@ -953,7 +1005,9 @@ function deriveSources(m){
   function push(u, t){
     if (!u || seen[u]) return;
     seen[u] = 1;
-    list.push({ url:u, title:t || u });
+    var title = stripHtml(t);
+    if (!title) title = u;
+    list.push({ url:u, title:title });
   }
   if (m.annotations && m.annotations.length){
     for (var i=0;i<m.annotations.length;i++){
@@ -1211,7 +1265,8 @@ function extractSources(res){
   function push(u, title, snip){
     if (!u || seen[u]) return;
     seen[u] = 1;
-    list.push({ url: u, title: title || u, snippet: snip || '' });
+    var t = stripHtml(title);
+    list.push({ url: u, title: t || u, snippet: stripHtml(snip) });
   }
   var ann = res.annotations;
   if (ann && ann.length){
@@ -1407,7 +1462,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       setArtifact('draft', dRes.content); addUsage(dRes.usage);
       setStage(6, 'done');
       setStage(7, 'running', dt);
-      var cSys = env + '\n\n你是内容评审员。对照《需求评价报告》与执行方案评审成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}';
+      var cSys = env + '\n\n你是内容评审员。对照《需求评价报告》与执行方案评审成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}。评审维度包括：内容准确完整、达到成功标准、排版清晰易读（标题层级/空行/列表/表格/代码块/公式均规范，无错乱样式）。';
       var cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + dRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
       addUsage(cRes.usage);
       var cp = parseScoreJson(cRes.content, threshold);
@@ -1423,7 +1478,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
 
     // ⑨ 输出整合（流式输出最终结果）
     setStage(8, 'running', 1);
-    var iSys = env + '\n\n你是输出编辑。请把成品整合为最终回答：内容以成品为准，按《需求评价报告》检查完整性，用清晰的 Markdown 排版；成品末尾如有参考来源，请保留为"参考来源"列表。直接输出最终回答正文。';
+    var iSys = env + '\n\n你是输出编辑。请把成品整合为最终回答：内容以成品为准，按《需求评价报告》检查完整性，用清晰的 Markdown 排版；成品末尾如有参考来源，请保留为"参考来源"列表。\n\n输出格式要求（必须遵守）：\n1. 使用多级标题与分点组织内容，层级清晰，禁止大段连续文字；\n2. 段落之间空行分隔，关键信息优先用列表或表格；\n3. 代码块必须注明语言；\n4. 公式按《数学公式排版规范》书写；\n5. 参考来源逐条换行列出（每条一行：序号 + 标题 + 链接），不要把网页中的表格或样式标签粘进正文；\n6. 输出前自查一遍：确认所有标题、列表、表格、代码块、公式均可正常渲染，无错乱标记。\n直接输出最终回答正文。';
     var iMsgs = [{ role:'system', content: iSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + bestDraft.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }];
     if (hasImages) iMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
     var iBody = {

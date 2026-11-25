@@ -99,6 +99,9 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 .md a:hover{text-decoration:underline}
 .md hr{border:none;border-top:1px solid var(--border);margin:14px 0}
 .md table{border-collapse:collapse;margin:10px 0;max-width:100%;display:block;overflow-x:auto}
+.md details{margin:8px 0;border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:#fafbfc}
+.md details summary{cursor:pointer;font-weight:600;color:var(--text2);font-size:13.5px}
+.md details[open] summary{margin-bottom:6px}
 .md th,.md td{border:1px solid var(--border2);padding:6px 12px;text-align:left;font-size:13.5px}
 .md th{background:#f5f6f9;font-weight:600}
 .codeblock{margin:10px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -597,7 +600,44 @@ function inlineMd(t){
   t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   t = t.replace(/(^|[\s(（])(https?:\/\/[^\s<>"'）)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  // 白名单 HTML 直通：换行、表格与折叠块（normalizeHTML 已清洗为安全形态）
+  t = t.replace(/&lt;(\/?)(table|thead|tbody|tr|td|th|details|summary|br)&gt;/g, '<$1$2>');
   return t;
+}
+// HTML 归一化：把 AI 输出中的常见 HTML 转成可渲染形态（白名单直通 / 转 markdown / 剥壳）
+function normalizeHTML(src){
+  if (!src || src.indexOf('<') < 0) return src;
+  src = src.replace(/<br\s*\/?>/gi, '\n');
+  src = src.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, function(m, lv, t){
+    return '\n\n' + '######'.slice(0, +lv) + ' ' + t.replace(/\s+/g, ' ').trim() + '\n\n';
+  });
+  src = src.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
+  src = src.replace(/<\/?(ul|ol)[^>]*>/gi, '\n');
+  src = src.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
+  src = src.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*');
+  src = src.replace(/<(del|s|strike)[^>]*>([\s\S]*?)<\/\1>/gi, '~~$2~~');
+  src = src.replace(/<(u|mark|sub|sup|span|font)[^>]*>([\s\S]*?)<\/\1>/gi, '$2');
+  src = src.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
+  src = src.replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
+  src = src.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*\/?>/gi, '\n\n![图片]($1)\n\n');
+  src = src.replace(/<\/?(p|div|section|article|blockquote|pre|center|form)[^>]*>/gi, '\n');
+  src = src.replace(/<(table|thead|tbody|tr|t[dh]|details|summary)\b[^>]*>/gi, function(tag){
+    var m = /^<(\/?)([a-z]+)/i.exec(tag);
+    return '<' + (m[1] || '') + m[2].toLowerCase() + '>';
+  });
+  src = src.replace(/<hr\s*\/?>/gi, '\n\n---\n\n');
+  src = src.replace(/<\/?(?!(?:table|thead|tbody|tr|td|th|details|summary)\b)[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?\/?>/g, '');
+  src = src.replace(/\n{4,}/g, '\n\n\n');
+  return src;
+}
+// 去除来源标题/摘要中残留的 HTML 标签
+function stripHtml(s){
+  return String(s == null ? '' : s)
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/?(table|thead|tbody|tr|td|th|div|p|span|b|i|em|strong|a|li|ul|ol|h[1-6])\b[^>]*>/gi, '')
+    .replace(/<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?\/?>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 function renderMarkdown(src){
   if (!src) return '';
@@ -606,6 +646,8 @@ function renderMarkdown(src){
     codes.push({ lang: lang||'', code: code.replace(/\n$/,'') });
     return '\u0000C'+(codes.length-1)+'\u0000';
   });
+  // HTML 归一化
+  src = normalizeHTML(src);
   var lines = src.split('\n');
   var out = [];
   var i = 0;
@@ -874,7 +916,9 @@ function deriveSources(m){
   function push(u, t){
     if (!u || seen[u]) return;
     seen[u] = 1;
-    list.push({ url:u, title:t || u });
+    var title = stripHtml(t);
+    if (!title) title = u;
+    list.push({ url:u, title:title });
   }
   if (m.annotations && m.annotations.length){
     for (var i=0;i<m.annotations.length;i++){
