@@ -225,6 +225,29 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 .md .katex{font-size:1.06em}
 .codeblock pre code.hljs{background:none;padding:0;font-size:13px;line-height:1.6}
 
+/* ---------- 超级思考流水线 ---------- */
+.effort-seg.super button[data-v="off"]{display:none}
+.super-box{margin:6px 0 10px;border:1px solid var(--border);border-radius:10px;background:#fff;padding:10px 12px}
+.super-head{font-size:12.5px;color:var(--text2);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.super-head .sdot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 5px rgba(24,160,88,.5);flex-shrink:0}
+.super-head .sdot.run{background:var(--accent);animation:blink 1.2s infinite}
+.super-steps{display:flex;flex-wrap:wrap;gap:6px}
+.sp-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:999px;padding:3px 10px;background:#fafbfc}
+.sp-chip.done{border-color:#b7e6cd;color:var(--ok);background:#f0faf4}
+.sp-chip.running{border-color:var(--accent);color:var(--accent);background:var(--accent-weak)}
+.sp-chip.retry{border-color:#f2c97b;color:#b7791f;background:#fdf6e8}
+.sp-chip.error{border-color:#f0b9b9;color:var(--danger);background:#fdf1f1}
+.sp-chip .sp-ico{width:14px;text-align:center;font-style:normal;flex-shrink:0}
+.sp-chip .sp-m{font-size:10px;background:#eef0f5;color:var(--text2);border-radius:4px;padding:0 5px;font-weight:600}
+.sp-spin{width:10px;height:10px;border:2px solid #c7d2fe;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;display:inline-block}
+.sp-art{margin-top:6px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.sp-art-head{display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 12px;font-size:12.5px;color:var(--text2);background:#fafbfc;text-align:left}
+.sp-art-head:hover{background:#f2f3f7}
+.sp-art-head svg{transition:transform .15s;flex-shrink:0}
+.sp-art.open .sp-art-head svg{transform:rotate(180deg)}
+.sp-art-body{display:none;padding:10px 12px;border-top:1px solid var(--border);font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto;color:var(--text2);background:#fcfcfd}
+.sp-art.open .sp-art-body{display:block}
+
 /* ---------- 响应式 ---------- */
 @media (max-width:920px){
   #sidebar{position:fixed;left:0;top:0;bottom:0;z-index:50;margin-left:-280px;box-shadow:none}
@@ -297,6 +320,9 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
         </div>
         <button class="search-toggle" id="search-toggle" title="联网搜索：开启后 AI 可搜索网页并附来源引用">
           <span class="dot"></span>联网
+        </button>
+        <button class="search-toggle" id="super-toggle" title="超级思考：多智能体流水线（需求分析→检索→方案→评分→制作→整合），联网自动开启，耗时较长">
+          <span class="dot"></span>超级思考
         </button>
       </div>
     </header>
@@ -371,7 +397,8 @@ var DEFAULT_SETTINGS = {
   systemPrompt: '',
   model: 'deepseek-flash',
   effort: 'high',          // off | high | max  （低/中/高）
-  webSearch: false
+  webSearch: false,
+  superThinking: false     // 超级思考：多智能体流水线
 };
 
 var MODEL_LABEL = {
@@ -441,7 +468,20 @@ function loadConvs(){
     var raw = safeGet(LS.convs);
     if (raw) {
       var arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return arr;
+      if (Array.isArray(arr)){
+        // 清理上次会话中断的流式消息
+        for (var i=0;i<arr.length;i++){
+          var ms = arr[i] && arr[i].messages;
+          if (!ms) continue;
+          for (var j=0;j<ms.length;j++){
+            if (ms[j] && ms[j].role === 'assistant' && ms[j].status === 'streaming'){
+              ms[j].status = 'error';
+              ms[j].error = '生成被中断（页面刷新或关闭）';
+            }
+          }
+        }
+        return arr;
+      }
     }
   } catch(e){}
   return [];
@@ -857,22 +897,7 @@ function toApiMessages(msgs){
   for (var i=0;i<msgs.length;i++){
     var m = msgs[i];
     if (m.role === 'user'){
-      var blocks = [];
-      var textParts = [];
-      if (m.content) textParts.push(m.content);
-      var files = m.files || [];
-      if (files.length){
-        var sec = [];
-        for (var f=0;f<files.length;f++){
-          var fl = files[f];
-          var lang = FILE_TEXT_EXTS[fileExt(fl.name)] || '';
-          sec.push('【附件文件 '+(f+1)+'】' + fl.name + (fl.truncated ? '（内容过长，已截断）' : '') + '\n```' + lang + '\n' + fl.content + '\n```');
-        }
-        textParts.push(sec.join('\n\n'));
-      }
-      if (textParts.length) blocks.push({ type:'text', text: textParts.join('\n\n') });
-      var imgs = m.images || [];
-      for (var j=0;j<imgs.length;j++) blocks.push({ type:'image_url', image_url:{ url: imgs[j] } });
+      var blocks = userContentBlocks(m, true);
       arr.push({ role:'user', content: blocks.length === 1 && blocks[0].type === 'text' ? blocks[0].text : blocks });
     } else {
       if (m.status === 'streaming') continue;
@@ -964,16 +989,24 @@ async function sendMessage(){
   if (!text && !images.length && !files.length) return;
   if (images.length && images.join('').length > 40*1024*1024){ toast('图片总大小过大，请压缩后再试'); return; }
 
-  var model = settings.model;
-  if (images.length && model !== 'deepseek-flash'){
-    model = 'deepseek-flash';
-    settings.model = model; saveSettings(); syncControls();
-    toast('图片输入需使用 Flash 模型，已自动切换');
+  var superMode = !!settings.superThinking;
+  if (superMode && settings.effort === 'off'){
+    settings.effort = 'high';
+    saveSettings(); syncControls();
   }
-  if (settings.webSearch && model !== 'deepseek-flash'){
-    model = 'deepseek-flash';
-    settings.model = model; saveSettings(); syncControls();
-    toast('联网搜索已自动切换到 Flash 模型（Pro 模型搜索效果不佳）');
+
+  var model = settings.model;
+  if (!superMode){
+    if (images.length && model !== 'deepseek-flash'){
+      model = 'deepseek-flash';
+      settings.model = model; saveSettings(); syncControls();
+      toast('图片输入需使用 Flash 模型，已自动切换');
+    }
+    if (settings.webSearch && model !== 'deepseek-flash'){
+      model = 'deepseek-flash';
+      settings.model = model; saveSettings(); syncControls();
+      toast('联网搜索已自动切换到 Flash 模型（Pro 模型搜索效果不佳）');
+    }
   }
 
   var userMsg = { id: uid(), role:'user', content:text, images:images, files:files, time:Date.now() };
@@ -989,6 +1022,14 @@ async function sendMessage(){
 
   var asst = { id: uid(), role:'assistant', content:'', reasoning:'', status:'streaming',
                model: model, searchEvents:[], annotations:null, serverCalls:null, usage:null };
+  if (superMode){
+    asst.kind = 'super';
+    asst.model = '超级思考 · ' + (settings.effort === 'max' ? 'max' : 'high') + ' 档';
+    asst.super = {
+      stages: SUPER_STAGES.map(function(s){ return { name: s.name, status: 'pending', tries: 0, model: s.model }; }),
+      artifacts: {}
+    };
+  }
   conv.messages.push(asst);
 
   saveConvs();
@@ -1000,45 +1041,58 @@ async function sendMessage(){
   var ctrl = new AbortController();
   activeAbort = ctrl;
 
-  var apiMessages = [{ role:'system', content: buildSystemPrompt() }].concat(toApiMessages(conv.messages));
-  var body = buildPayload(apiMessages, model, settings);
+  if (superMode){
+    try {
+      await runSuperPipeline(conv, userMsg, asst, ctrl);
+    } catch(e){
+      handleSendError(e, conv, asst);
+    }
+  } else {
+    var apiMessages = [{ role:'system', content: buildSystemPrompt() }].concat(toApiMessages(conv.messages));
+    var body = buildPayload(apiMessages, model, settings);
 
-  try {
-    var resp = await fetch(API_BASE + '/chat/completions', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + settings.apiKey },
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    });
-    if (!resp.ok){
-      var errJson = null;
-      try { errJson = await resp.json(); } catch(e){}
-      throw new Error(apiErrorMessage(resp.status, errJson));
-    }
-    await consumeStream(resp, asst);
-    asst.status = 'done';
-    asst.sources = deriveSources(asst);
-  } catch(e){
-    if (e && e.name === 'AbortError'){
-      if (asst.content || asst.reasoning){
-        asst.status = 'done';
-        asst.sources = deriveSources(asst);
-      } else {
-        conv.messages.pop();
+    try {
+      var resp = await fetch(API_BASE + '/chat/completions', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + settings.apiKey },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      if (!resp.ok){
+        var errJson = null;
+        try { errJson = await resp.json(); } catch(e){}
+        throw new Error(apiErrorMessage(resp.status, errJson));
       }
-    } else {
-      asst.status = 'error';
-      asst.error = (e && e.message) || '未知错误';
-      if (asst.content) asst.status = 'done';
-      else if (!asst.reasoning){ /* 保留错误信息展示 */ }
+      await consumeStream(resp, asst);
+      asst.status = 'done';
+      asst.sources = deriveSources(asst);
+    } catch(e){
+      handleSendError(e, conv, asst);
     }
-  } finally {
-    streaming = false;
-    activeAbort = null;
-    updateBusyUI();
-    saveConvs();
-    renderAll();
-    autosize();
+  }
+  streaming = false;
+  activeAbort = null;
+  updateBusyUI();
+  saveConvs();
+  renderAll();
+  autosize();
+}
+function handleSendError(e, conv, asst){
+  if (e && e.name === 'AbortError'){
+    var hasArtifacts = asst.super && Object.keys(asst.super.artifacts || {}).length;
+    if (asst.content || asst.reasoning || hasArtifacts){
+      asst.status = 'done';
+      if (asst.kind === 'super' && !asst.content){
+        asst.content = '（生成已停止，中间过程保留在下方）';
+      }
+      asst.sources = asst.sources || deriveSources(asst);
+    } else {
+      conv.messages.pop();
+    }
+  } else {
+    asst.status = 'error';
+    asst.error = (e && e.message) || '未知错误';
+    if (asst.content) asst.status = 'done';
   }
 }
 function consumeStream(resp, asst){
@@ -1090,6 +1144,412 @@ function consumeStream(resp, asst){
   });
 }
 
+/* ---------- 超级思考流水线 ---------- */
+var SUPER_STAGES = [
+  { name:'需求分析', model:'pro' },
+  { name:'初步检索', model:'flash' },
+  { name:'方案制定', model:'pro' },
+  { name:'方案评分', model:'flash' },
+  { name:'深度检索', model:'flash' },
+  { name:'真实性核验', model:'pro' },
+  { name:'内容制作', model:'pro' },
+  { name:'内容评分', model:'flash' },
+  { name:'整合输出', model:'pro' }
+];
+var WEB_TOOL = [{ type:'deepseek_web_search' }];
+
+// 按环节功能分配模型：联网检索与打分用 flash；含图片的环节强制 flash；重推理用 pro
+function superStageModel(stageId, hasImages){
+  if (stageId === 'search1' || stageId === 'search2' || stageId === 'planScore' || stageId === 'score') return 'deepseek-flash';
+  if (hasImages && (stageId === 'req' || stageId === 'draft' || stageId === 'integrate')) return 'deepseek-flash';
+  return 'deepseek-v4-pro';
+}
+function userContentBlocks(m, includeImages){
+  var blocks = [];
+  var textParts = [];
+  if (m.content) textParts.push(m.content);
+  var files = m.files || [];
+  if (files.length){
+    var sec = [];
+    for (var f=0;f<files.length;f++){
+      var fl = files[f];
+      var lang = FILE_TEXT_EXTS[fileExt(fl.name)] || '';
+      sec.push('【附件文件 '+(f+1)+'】' + fl.name + (fl.truncated ? '（内容过长，已截断）' : '') + '\n```' + lang + '\n' + fl.content + '\n```');
+    }
+    textParts.push(sec.join('\n\n'));
+  }
+  if (textParts.length) blocks.push({ type:'text', text: textParts.join('\n\n') });
+  if (includeImages !== false){
+    var imgs = m.images || [];
+    for (var j=0;j<imgs.length;j++) blocks.push({ type:'image_url', image_url:{ url: imgs[j] } });
+  }
+  return blocks;
+}
+function userTextOf(m){
+  var bs = userContentBlocks(m, false);
+  return (bs.length && bs[0].type === 'text') ? bs[0].text : (m.content || '');
+}
+function parseScoreJson(text, threshold){
+  var t = String(text || '').replace(/^```(json)?\s*/,'').replace(/```\s*$/,'').trim();
+  try {
+    var o = JSON.parse(t);
+    if (o && typeof o.score === 'number'){
+      var passVal = (typeof o.pass === 'boolean') ? o.pass : (o.score >= threshold);
+      return { score: o.score, pass: passVal, reason: o.reason || '' };
+    }
+  } catch(e){}
+  var m = t.match(/"score"\s*:\s*(\d+)/);
+  if (m){
+    var p = t.match(/"pass"\s*:\s*(true|false)/);
+    var pass = p ? p[1] === 'true' : (+m[1] >= threshold);
+    return { score: +m[1], pass: pass, reason: t.slice(0, 200) };
+  }
+  return null;
+}
+function extractSources(res){
+  var seen = {}, list = [];
+  function push(u, title, snip){
+    if (!u || seen[u]) return;
+    seen[u] = 1;
+    list.push({ url: u, title: title || u, snippet: snip || '' });
+  }
+  var ann = res.annotations;
+  if (ann && ann.length){
+    for (var i=0;i<ann.length;i++){
+      var c = ann[i] && ann[i].url_citation;
+      if (c) push(c.url, c.title, '');
+    }
+  }
+  var sc = res.server_tool_calls;
+  if (sc){
+    for (var j=0;j<sc.length;j++){
+      var calls = sc[j] && sc[j].calls;
+      if (!calls) continue;
+      for (var k=0;k<calls.length;k++){
+        var srcs = calls[k] && calls[k].sources;
+        if (!srcs) continue;
+        for (var s=0;s<srcs.length;s++){
+          if (srcs[s] && srcs[s].type === 'url') push(srcs[s].url, srcs[s].title, srcs[s].snippet);
+          if (list.length >= 16) return list;
+        }
+      }
+    }
+  }
+  return list.slice(0, 16);
+}
+function sourcesText(list){
+  if (!list || !list.length) return '（暂无来源）';
+  return list.map(function(s, i){
+    return '[' + (i+1) + '] ' + (s.title || s.url) + '（' + s.url + '）' + (s.snippet ? '\n摘要：' + s.snippet.slice(0, 300) : '');
+  }).join('\n');
+}
+function mergeSources(base, add){
+  var seen = {}, out = [];
+  (base || []).concat(add || []).forEach(function(s){
+    if (!s || !s.url || seen[s.url]) return;
+    seen[s.url] = 1;
+    out.push(s);
+  });
+  return out.slice(0, 16);
+}
+
+async function superStageCall(messages, cfg){
+  var body = {
+    model: cfg.model,
+    messages: messages,
+    stream: false,
+    thinking: { type: 'enabled' },
+    reasoning_effort: settings.effort
+  };
+  if (cfg.json) body.response_format = { type: 'json_object' };
+  if (cfg.tools) body.tools = cfg.tools;
+  var headers = { 'Content-Type':'application/json', 'Authorization':'Bearer ' + settings.apiKey };
+  var resp = await fetch(API_BASE + '/chat/completions', {
+    method:'POST', headers: headers, body: JSON.stringify(body), signal: cfg.signal
+  });
+  if (!resp.ok && cfg.json){
+    // json 模式可能不被支持，去掉后重试一次
+    delete body.response_format;
+    var r2 = await fetch(API_BASE + '/chat/completions', {
+      method:'POST', headers: headers, body: JSON.stringify(body), signal: cfg.signal
+    });
+    if (r2.ok){
+      var d2 = await r2.json();
+      var m2 = d2.choices && d2.choices[0] && d2.choices[0].message;
+      return { content: (m2 && m2.content) || '', annotations: m2 && m2.annotations, server_tool_calls: m2 && m2.server_tool_calls, usage: d2.usage };
+    }
+    resp = r2;
+  }
+  if (!resp.ok){
+    var errJson = null;
+    try { errJson = await resp.json(); } catch(e){}
+    throw new Error(apiErrorMessage(resp.status, errJson));
+  }
+  var data = await resp.json();
+  var msg = data.choices && data.choices[0] && data.choices[0].message;
+  return { content: (msg && msg.content) || '', annotations: msg && msg.annotations, server_tool_calls: msg && msg.server_tool_calls, usage: data.usage };
+}
+
+async function runSuperPipeline(conv, userMsg, asst, ctrl){
+  var effort = settings.effort;                       // 'high' | 'max'
+  var maxRetry = effort === 'max' ? 3 : 2;
+  var threshold = effort === 'max' ? 80 : 70;
+  var deepRounds = effort === 'max' ? 2 : 1;
+  var hasImages = !!(userMsg.images && userMsg.images.length);
+  var ctx = { totalUsage: null, allSources: [] };
+  var env = '【环境信息】今天是 ' + nowDateStr() + '。';
+
+  function setStage(i, status, tries){
+    var st = asst.super.stages[i];
+    st.status = status;
+    if (tries != null) st.tries = tries;
+    st.model = superStageModel(STAGE_IDS[i], hasImages);
+    updateSuperUI(asst);
+  }
+  function setArtifact(k, v){ asst.super.artifacts[k] = v; }
+  function addUsage(u){
+    if (!u) return;
+    if (!ctx.totalUsage) ctx.totalUsage = { prompt_tokens:0, completion_tokens:0, total_tokens:0, completion_tokens_details:{ reasoning_tokens:0 } };
+    ctx.totalUsage.prompt_tokens += u.prompt_tokens || 0;
+    ctx.totalUsage.completion_tokens += u.completion_tokens || 0;
+    ctx.totalUsage.total_tokens += u.total_tokens || 0;
+    if (u.completion_tokens_details) ctx.totalUsage.completion_tokens_details.reasoning_tokens += u.completion_tokens_details.reasoning_tokens || 0;
+  }
+  var STAGE_IDS = ['req','search1','plan','planScore','search2','verify','draft','score','integrate'];
+
+  try {
+    // ① 需求猜测
+    setStage(0, 'running', 1);
+    var reqSys = env + '\n\n你是需求分析专家。请根据用户的问题' + (hasImages ? '（可能包含图片，请结合图片内容）' : '') + '推测用户的真实需求与深层意图，输出《需求评价报告》，包含：\n1. 核心需求\n2. 隐含需求\n3. 成功标准（尽量具体、可验证）\n4. 约束与边界\n5. 期望输出形式。\n只输出报告本身，不要执行任务。';
+    var reqRes = await superStageCall([{ role:'system', content: reqSys }, { role:'user', content: userContentBlocks(userMsg, true) }], { model: superStageModel('req', hasImages), signal: ctrl.signal });
+    setArtifact('req', reqRes.content); addUsage(reqRes.usage); setStage(0, 'done');
+
+    // ② 初步检索（联网，优先相似案例）
+    setStage(1, 'running', 1);
+    var search1Res = null;
+    try {
+      var s1Sys = env + '\n\n你是信息检索助手。请联网搜索与《需求评价报告》相关的资料，**优先查找网上相似的案例、范例、教程、参考实现**，并对检索结果做摘要整理：分条列出找到的相似案例与关键信息，注明来源标题。';
+      search1Res = await superStageCall([{ role:'system', content: s1Sys }, { role:'user', content: '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content }], { model: 'deepseek-flash', tools: WEB_TOOL, signal: ctrl.signal });
+      setArtifact('search1', search1Res.content);
+      ctx.allSources = mergeSources(ctx.allSources, extractSources(search1Res));
+    } catch(e){ setArtifact('search1', '（检索失败：' + e.message + '）'); }
+    addUsage(search1Res && search1Res.usage); setStage(1, 'done');
+
+    // ③④ 方案制定 + 方案评分（重做循环，取最优）
+    var bestPlan = { content:'', score:-1, reason:'' };
+    var planFeedback = '';
+    var planScores = [];
+    for (var t = 1; t <= maxRetry + 1; t++){
+      setStage(2, t > 1 ? 'retry' : 'running', t);
+      var pSys = env + '\n\n你是方案架构师。基于《需求评价报告》与检索摘要，制定一份执行方案，包含：\n1. 目标\n2. 执行步骤\n3. 内容大纲/要点\n4. 质量标准\n5. 风险与规避。\n只输出方案本身。';
+      var pUser = '《需求评价报告》：\n' + reqRes.content + '\n\n检索摘要：\n' + (asst.super.artifacts.search1 || '（无）') + (planFeedback ? '\n\n【上次评审未通过，请据此改进】\n' + planFeedback : '');
+      var planRes = await superStageCall([{ role:'system', content: pSys }, { role:'user', content: pUser }], { model: superStageModel('plan', hasImages), signal: ctrl.signal });
+      setArtifact('plan', planRes.content); addUsage(planRes.usage);
+      setStage(2, 'done');
+      setStage(3, 'running', t);
+      var scSys = env + '\n\n你是方案评审员。对照《需求评价报告》评审执行方案是否满足需求，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}';
+      var scRes = await superStageCall([{ role:'system', content: scSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
+      addUsage(scRes.usage);
+      var p = parseScoreJson(scRes.content, threshold);
+      if (!p) p = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）' };
+      planScores.push('第' + t + '次：得分 ' + p.score + (p.pass ? '，通过' : '，未通过') + (p.reason ? '\n—— ' + p.reason : ''));
+      setArtifact('planScores', planScores);
+      if (p.score > bestPlan.score) bestPlan = { content: planRes.content, score: p.score, reason: p.reason || '' };
+      setStage(3, 'done');
+      if (p.pass || t > maxRetry) break;
+      planFeedback = p.reason || '未说明原因';
+    }
+    var plan = bestPlan.content;
+
+    // ⑤ 深度检索（high 1 轮 / max 2 轮交叉验证）
+    setStage(4, 'running', 1);
+    var search2Text = '';
+    for (var r = 1; r <= deepRounds; r++){
+      var s2Sys, s2User;
+      if (r === 1){
+        s2Sys = env + '\n\n你是信息检索助手。请联网搜索执行方案所需的详细信息，**优先查找相似案例与参考实现**，输出《资料汇编》：关键信息分条列出并注明来源标题。';
+        s2User = '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan;
+      } else {
+        s2Sys = env + '\n\n请针对上一轮《资料汇编》中的关键事实做交叉验证：另找独立来源核对，指出哪些可信、哪些存疑，并补充来源。';
+        s2User = '上一轮《资料汇编》：\n' + search2Text;
+      }
+      var s2Res = null;
+      try {
+        s2Res = await superStageCall([{ role:'system', content: s2Sys }, { role:'user', content: s2User }], { model: 'deepseek-flash', tools: WEB_TOOL, signal: ctrl.signal });
+        search2Text += (r > 1 ? '\n\n【第' + r + '轮 · 交叉验证】\n' : '') + s2Res.content;
+        setArtifact('search2', search2Text);
+        ctx.allSources = mergeSources(ctx.allSources, extractSources(s2Res));
+        addUsage(s2Res.usage);
+      } catch(e){
+        search2Text += '\n\n【第' + r + '轮检索失败：' + e.message + '】';
+        setArtifact('search2', search2Text);
+      }
+    }
+    setStage(4, 'done');
+
+    // ⑥ 真实性核验
+    setStage(5, 'running', 1);
+    var vSys = env + '\n\n你是事实核查员。请基于《资料汇编》与来源列表核对关键事实的可靠性，剔除存疑或矛盾内容，输出《核验报告》：\n1. 可信要点\n2. 存疑项及处理建议\n3. 修正后的关键信息。';
+    var vRes = await superStageCall([{ role:'system', content: vSys }, { role:'user', content: '执行方案：\n' + plan + '\n\n《资料汇编》：\n' + search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }], { model: superStageModel('verify', hasImages), signal: ctrl.signal });
+    setArtifact('verify', vRes.content); addUsage(vRes.usage); setStage(5, 'done');
+
+    // ⑦⑧ 内容制作 + 内容评分（重做循环，取最高分）
+    var bestDraft = { content:'', score:-1, reason:'' };
+    var draftFeedback = '';
+    var draftScores = [];
+    for (var dt = 1; dt <= maxRetry + 1; dt++){
+      setStage(6, dt > 1 ? 'retry' : 'running', dt);
+      var dSys = env + '\n\n你是内容制作专家。请严格按《需求评价报告》与执行方案制作最终成品，只使用《核验报告》中可信的资料，保证内容准确完整、达到成功标准。直接输出成品内容，不要解释过程。';
+      var dUser = '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n《核验报告》：\n' + vRes.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) + (draftFeedback ? '\n\n【上一版评审意见（得分未达标），请据此改进】\n' + draftFeedback : '');
+      var dMsgs = [{ role:'system', content: dSys }, { role:'user', content: dUser }];
+      if (hasImages) dMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
+      var dRes = await superStageCall(dMsgs, { model: superStageModel('draft', hasImages), signal: ctrl.signal });
+      setArtifact('draft', dRes.content); addUsage(dRes.usage);
+      setStage(6, 'done');
+      setStage(7, 'running', dt);
+      var cSys = env + '\n\n你是内容评审员。对照《需求评价报告》与执行方案评审成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}';
+      var cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + dRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
+      addUsage(cRes.usage);
+      var cp = parseScoreJson(cRes.content, threshold);
+      if (!cp) cp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）' };
+      draftScores.push('第' + dt + '次：得分 ' + cp.score + (cp.pass ? '，通过' : '，未通过') + (cp.reason ? '\n—— ' + cp.reason : ''));
+      setArtifact('draftScores', draftScores);
+      if (cp.score > bestDraft.score) bestDraft = { content: dRes.content, score: cp.score, reason: cp.reason || '' };
+      setStage(7, 'done');
+      if (cp.pass || dt > maxRetry) break;
+      draftFeedback = cp.reason || '未说明原因';
+    }
+    setArtifact('draftBest', bestDraft.content);
+
+    // ⑨ 输出整合（流式输出最终结果）
+    setStage(8, 'running', 1);
+    var iSys = env + '\n\n你是输出编辑。请把成品整合为最终回答：内容以成品为准，按《需求评价报告》检查完整性，用清晰的 Markdown 排版；成品末尾如有参考来源，请保留为"参考来源"列表。直接输出最终回答正文。';
+    var iMsgs = [{ role:'system', content: iSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + bestDraft.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }];
+    if (hasImages) iMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
+    var iBody = {
+      model: superStageModel('integrate', hasImages),
+      messages: iMsgs,
+      stream: true,
+      thinking: { type: 'enabled' },
+      reasoning_effort: settings.effort
+    };
+    var resp9 = await fetch(API_BASE + '/chat/completions', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + settings.apiKey },
+      body: JSON.stringify(iBody),
+      signal: ctrl.signal
+    });
+    if (!resp9.ok){
+      var errJson9 = null;
+      try { errJson9 = await resp9.json(); } catch(e){}
+      throw new Error(apiErrorMessage(resp9.status, errJson9));
+    }
+    await consumeStream(resp9, asst);
+    setStage(8, 'done');
+
+    asst.status = 'done';
+    asst.sources = ctx.allSources.slice(0, 10).map(function(s){ return { url: s.url, title: s.title }; });
+    asst.usage = ctx.totalUsage;
+    updateSuperUI(asst);
+  } catch(e){
+    var cur = asst.super.stages;
+    for (var i=0;i<cur.length;i++){
+      if (cur[i].status === 'running' || cur[i].status === 'retry') cur[i].status = 'error';
+    }
+    updateSuperUI(asst);
+    throw e;
+  }
+}
+function currentRunningIdx(stages){
+  for (var i=0;i<stages.length;i++){
+    if (stages[i].status === 'running' || stages[i].status === 'retry') return i;
+  }
+  return -1;
+}
+function superChipsHTML(m){
+  var sts = (m.super && m.super.stages) || [];
+  return sts.map(function(s, i){
+    var ic;
+    if (s.status === 'done') ic = '✓';
+    else if (s.status === 'running') ic = '<span class="sp-spin"></span>';
+    else if (s.status === 'retry') ic = '↻';
+    else if (s.status === 'error') ic = '!';
+    else ic = '·';
+    var extra = (s.status === 'retry' && s.tries > 1) ? ' 第' + s.tries + '次' : '';
+    return '<span class="sp-chip ' + s.status + '"><i class="sp-ico">' + ic + '</i>' + escapeHtml(s.name) + extra + '<b class="sp-m">' + escapeHtml(s.model === 'deepseek-v4-pro' ? 'pro' : (s.model || 'flash')) + '</b></span>';
+  }).join('');
+}
+function superArtifactsHTML(m){
+  var a = (m.super && m.super.artifacts) || {};
+  var sts = (m.super && m.super.stages) || [];
+  var defs = [
+    ['req', '需求评价报告', a.req],
+    ['search1', '初步检索摘要', a.search1],
+    ['plan', '执行方案（最佳）', a.plan],
+    ['planScores', '方案评审记录', Array.isArray(a.planScores) && a.planScores.length ? a.planScores.join('\n\n') : ''],
+    ['search2', '资料汇编', a.search2],
+    ['verify', '真实性核验报告', a.verify],
+    ['draftBest', '成品（最佳）', a.draftBest],
+    ['draftScores', '内容评审记录', Array.isArray(a.draftScores) && a.draftScores.length ? a.draftScores.join('\n\n') : '']
+  ];
+  var curIdx = m.status === 'streaming' ? currentRunningIdx(sts) : -1;
+  var out = [];
+  for (var i=0;i<defs.length;i++){
+    var title = defs[i][1], content = defs[i][2];
+    if (!content) continue;
+    var open = curIdx >= 0 && ((defs[i][0] === 'req' && curIdx === 0) || (defs[i][0] === 'search1' && curIdx === 1) || (defs[i][0] === 'plan' && curIdx === 2) || (defs[i][0] === 'planScores' && curIdx === 3) || (defs[i][0] === 'search2' && curIdx === 4) || (defs[i][0] === 'verify' && curIdx === 5) || (defs[i][0] === 'draft' && curIdx === 6) || (defs[i][0] === 'draftBest' && curIdx === 6) || (defs[i][0] === 'draftScores' && curIdx === 7));
+    out.push('<div class="sp-art' + (open ? ' open' : '') + '"><button class="sp-art-head" type="button"><span>' + escapeHtml(title) + '</span><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 6l5 5 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="sp-art-body">' + escapeHtml(String(content)) + '</div></div>');
+  }
+  return out.join('');
+}
+function updateSuperUI(m){
+  var el = liveEls[m.id];
+  if (!el) return;
+  if (el.headEl){
+    var done = m.status !== 'streaming';
+    el.headEl.innerHTML = '<span class="sdot' + (done ? '' : ' run') + '"></span>' + (done ? '流水线完成 · 用时见下方' : '超级思考流水线运行中（约 1~3 分钟）');
+  }
+  if (el.stepsEl) el.stepsEl.innerHTML = superChipsHTML(m);
+  if (el.artsEl) el.artsEl.innerHTML = superArtifactsHTML(m);
+  if (nearBottom()) scrollToBottom(false);
+}
+function superMessageHTML(m, name){
+  var h = '<div class="msg assistant" data-id="' + m.id + '">'
+    + '<div class="msg-avatar"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2l6 3.5v5L8 14 2 10.5v-5L8 2z" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg></div>'
+    + '<div class="msg-body">'
+    + '<div class="msg-name">' + name + '<span class="m-model">' + escapeHtml(m.model || '超级思考') + '</span></div>'
+    + '<div class="super-box">'
+    + '<div class="super-head">' + (m.status === 'streaming' ? '<span class="sdot run"></span>超级思考流水线运行中（约 1~3 分钟）' : '<span class="sdot"></span>流水线完成') + '</div>'
+    + '<div class="super-steps">' + superChipsHTML(m) + '</div>'
+    + '<div class="super-arts">' + superArtifactsHTML(m) + '</div>'
+    + '</div>';
+  if (m.status === 'error' && !m.content){
+    h += '<div class="msg-error"><b>出错了</b>' + escapeHtml(m.error || '未知错误') + '</div>';
+  } else if (m.content){
+    h += '<div class="msg-content md">' + renderMarkdown(m.content) + '</div>';
+  } else if (m.status === 'streaming'){
+    h += '<div class="msg-content"><span class="typing"><i></i><i></i><i></i></span></div>';
+  }
+  if (m.status === 'done' && m.sources && m.sources.length){
+    h += '<div class="sources"><div class="sources-title">参考来源</div>'
+      + m.sources.map(function(s, idx){
+          return '<a href="' + escapeHtml(s.url) + '" target="_blank" rel="noopener noreferrer"><span class="s-idx">' + (idx+1) + '.</span><span class="s-t">' + escapeHtml(s.title) + '</span></a>';
+        }).join('')
+      + '</div>';
+  }
+  if (m.usage){
+    var u = m.usage;
+    var parts = ['输入 ' + u.prompt_tokens];
+    if (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) parts.push('思考 ' + u.completion_tokens_details.reasoning_tokens);
+    parts.push('输出 ' + u.completion_tokens);
+    h += '<div class="usage-line">' + parts.join(' · ') + ' tokens（全程合计）</div>';
+  }
+  h += '</div>';
+  if (m.status !== 'streaming') h += msgActions(m);
+  h += '</div>';
+  return h;
+}
+
 /* ---------- 渲染 ---------- */
 function renderAll(){
   renderSidebar();
@@ -1129,10 +1589,20 @@ function renderTopbar(){
 function syncControls(){
   $('model-select').value = settings.model;
   var btns = $('effort-seg').querySelectorAll('button');
+  var superOn = !!settings.superThinking;
   for (var i=0;i<btns.length;i++){
     btns[i].classList.toggle('on', btns[i].getAttribute('data-v') === settings.effort);
   }
-  $('search-toggle').classList.toggle('on', !!settings.webSearch);
+  $('effort-seg').classList.toggle('super', superOn);
+  var bOff = $('effort-seg').querySelector('button[data-v="off"]');
+  var bHigh = $('effort-seg').querySelector('button[data-v="high"]');
+  var bMax = $('effort-seg').querySelector('button[data-v="max"]');
+  if (bOff) bOff.style.display = superOn ? 'none' : '';
+  if (bHigh) bHigh.textContent = superOn ? '高' : '中';
+  if (bMax) bMax.textContent = superOn ? '超高' : '高';
+  $('search-toggle').classList.toggle('on', !!settings.webSearch || superOn);
+  $('search-toggle').style.pointerEvents = superOn ? 'none' : '';
+  $('super-toggle').classList.toggle('on', superOn);
   $('api-key-input').value = settings.apiKey;
   $('sys-prompt-input').value = settings.systemPrompt || '';
 }
@@ -1158,6 +1628,15 @@ function renderMessages(){
   for (var j=0;j<conv.messages.length;j++){
     var m = conv.messages[j];
     if (m.status === 'streaming'){
+      if (m.kind === 'super'){
+        liveEls[m.id] = {
+          stepsEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-steps'),
+          artsEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-arts'),
+          headEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-head'),
+          contentEl: inner.querySelector('.msg[data-id="'+m.id+'"] .msg-content')
+        };
+        continue;
+      }
       liveEls[m.id] = {
         reasoningBody: inner.querySelector('.msg[data-id="'+m.id+'"] .reasoning-body'),
         reasoningHead: inner.querySelector('.msg[data-id="'+m.id+'"] .reasoning-head'),
@@ -1190,6 +1669,7 @@ function messageHTML(m){
       + '</div>';
   } else {
     var name = 'DeepSeek';
+    if (m.kind === 'super') return superMessageHTML(m, name);
     if (m.status === 'error' && !m.content && !m.reasoning){
       h += '<div class="msg assistant" data-id="'+m.id+'">'
         + '<div class="msg-avatar"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2l6 3.5v5L8 14 2 10.5v-5L8 2z" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg></div>'
@@ -1489,6 +1969,15 @@ function bindEvents(){
     syncControls();
     toast(settings.webSearch ? '已开启联网搜索（模型将自动搜索网页并附来源）' : '已关闭联网搜索');
   });
+  $('super-toggle').addEventListener('click', function(){
+    settings.superThinking = !settings.superThinking;
+    if (settings.superThinking && settings.effort === 'off'){
+      settings.effort = 'high';
+    }
+    saveSettings();
+    syncControls();
+    toast(settings.superThinking ? '已开启超级思考（多智能体流水线，联网自动开启，单次约 1~3 分钟）' : '已关闭超级思考');
+  });
   $('btn-clear').addEventListener('click', function(e){
     armAction('clear', 'cur', this, clearConv);
   });
@@ -1515,6 +2004,11 @@ function bindEvents(){
     if (fCard){
       var fb = fCard.nextElementSibling;
       if (fb && fb.classList.contains('file-body')) fb.classList.toggle('open');
+      return;
+    }
+    var spHead = e.target.closest('.sp-art-head');
+    if (spHead){
+      spHead.closest('.sp-art').classList.toggle('open');
       return;
     }
     var rHead = e.target.closest('.reasoning-head');
