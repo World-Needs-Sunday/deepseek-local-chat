@@ -250,6 +250,15 @@ input,select,textarea{font-family:inherit;font-size:14px;color:var(--text)}
 .sp-art.open .sp-art-head svg{transform:rotate(180deg)}
 .sp-art-body{display:none;padding:10px 12px;border-top:1px solid var(--border);font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto;color:var(--text2);background:#fcfcfd}
 .sp-art.open .sp-art-body{display:block}
+.sp-flow{margin-top:10px;border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:#fbfcfe}
+.sp-flow-head{font-size:12px;color:var(--text2);margin-bottom:8px;font-weight:600}
+.sp-flow-body{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.f-node{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:8px;padding:4px 10px;background:#fff;max-width:220px}
+.f-node.done{border-color:#b7e6cd;color:var(--ok);background:#f0faf4}
+.f-node.running{border-color:var(--accent);color:var(--accent);background:var(--accent-weak)}
+.f-node.retry,.f-node.warn{border-color:#f2c97b;color:#b7791f;background:#fdf6e8}
+.f-node.error{border-color:#f0b9b9;color:var(--danger);background:#fdf1f1}
+.f-arrow{color:#c3c9d4;font-size:12px}
 
 /* ---------- 响应式 ---------- */
 @media (max-width:920px){
@@ -712,6 +721,15 @@ function stripHtml(s){
     .replace(/\s+/g, ' ')
     .trim();
 }
+// 公式宽松清洗：修复 AI 常见的未转义问题（已转义的不动）
+function sanitizeTex(tex, isDisplay){
+  var t = tex;
+  t = t.replace(/(?<!\\)%/g, '\\%');       // % 是注释符，未转义会吞掉后半段
+  if (!isDisplay){
+    t = t.replace(/(?<!\\)&/g, '\\&');     // & 是对齐符，行内未转义会解析失败
+  }
+  return t;
+}
 function renderMarkdown(src){
   if (!src) return '';
   var codes = [];
@@ -721,14 +739,23 @@ function renderMarkdown(src){
   });
   // HTML 归一化（在公式提取前，避免破坏公式）
   src = normalizeHTML(src);
+  // 定界符兜底：\(...\) → $...$，\[...\] → $$...$$（AI 偶发使用 LaTeX 原生定界符）
+  src = src.replace(/\\\[([\s\S]*?)\\\]/g, function(m, tex){ return '\n\n$$' + tex.trim() + '$$\n\n'; });
+  src = src.replace(/\\\(([^\\$\n]{1,300}?)\\\)/g, function(m, tex){ return '$' + tex.trim() + '$'; });
   // 提取数学公式，避免被 Markdown 处理破坏
   var maths = [];
   src = src.replace(/\$\$([\s\S]+?)\$\$/g, function(m, tex){
-    maths.push({ tex: tex.trim(), display: true });
+    maths.push({ tex: sanitizeTex(tex.trim(), true), display: true });
     return '\u0000M'+(maths.length-1)+'\u0000';
   });
   src = src.replace(/\$([^$\s](?:[^$\n]*[^$\s])?)\$/g, function(m, tex){
-    maths.push({ tex: tex.trim(), display: false });
+    var t = tex.trim();
+    if (/^\d/.test(t)) return m;                       // 货币误判兜底：$50 和 $60
+    if (/\\begin\{/.test(t) || /\\\\/.test(t)){        // aligned 等环境或换行 → 升级块级
+      maths.push({ tex: sanitizeTex(t, true), display: true });
+    } else {
+      maths.push({ tex: sanitizeTex(t, false), display: false });
+    }
     return '\u0000M'+(maths.length-1)+'\u0000';
   });
   var lines = src.split('\n');
@@ -1081,7 +1108,8 @@ async function sendMessage(){
     asst.model = '超级思考 · ' + (settings.effort === 'max' ? 'max' : 'high') + ' 档';
     asst.super = {
       stages: SUPER_STAGES.map(function(s){ return { name: s.name, status: 'pending', tries: 0, model: s.model }; }),
-      artifacts: {}
+      artifacts: {},
+      flow: { nodes: [] }
     };
   }
   conv.messages.push(asst);
@@ -1206,17 +1234,85 @@ var SUPER_STAGES = [
   { name:'方案评分', model:'flash' },
   { name:'深度检索', model:'flash' },
   { name:'真实性核验', model:'pro' },
-  { name:'内容制作', model:'pro' },
-  { name:'内容评分', model:'flash' },
-  { name:'整合输出', model:'pro' }
+  { name:'模块制作', model:'pro' },
+  { name:'模块评分', model:'flash' },
+  { name:'内容整合', model:'pro' },
+  { name:'整体验收', model:'flash' },
+  { name:'输出排版', model:'pro' }
 ];
 var WEB_TOOL = [{ type:'deepseek_web_search' }];
 
 // 按环节功能分配模型：联网检索与打分用 flash；含图片的环节强制 flash；重推理用 pro
 function superStageModel(stageId, hasImages){
-  if (stageId === 'search1' || stageId === 'search2' || stageId === 'planScore' || stageId === 'score') return 'deepseek-flash';
-  if (hasImages && (stageId === 'req' || stageId === 'draft' || stageId === 'integrate')) return 'deepseek-flash';
+  if (stageId === 'search1' || stageId === 'search2' || stageId === 'planScore' || stageId === 'score' || stageId === 'finalCheck') return 'deepseek-flash';
+  if (hasImages && (stageId === 'req' || stageId === 'draft' || stageId === 'output')) return 'deepseek-flash';
   return 'deepseek-v4-pro';
+}
+function truncText(s, n){
+  s = String(s == null ? '' : s);
+  return s.length > n ? s.slice(0, n) + '\n…（内容过长已截断）' : s;
+}
+// 解析方案智能体输出的 JSON 方案；失败返回 null
+function parsePlanJson(text){
+  var t = String(text || '').replace(/^```(json)?\s*/,'').replace(/```\s*$/,'').trim();
+  try {
+    var o = JSON.parse(t);
+    if (o && Array.isArray(o.modules) && o.modules.length) return o;
+    if (o && o.title && !Array.isArray(o.modules)){
+      o.modules = [{ name:'整体任务', goal: o.overview || '', accept: (o.final_check && o.final_check.accept) || '满足《需求评价报告》的成功标准', points: '' }];
+      return o;
+    }
+  } catch(e){}
+  return null;
+}
+function fallbackPlan(){
+  return {
+    title: '（方案解析失败，按整体任务处理）',
+    overview: '',
+    flowchart: '整体任务 → 内容整合 → 整体验收 → 输出',
+    modules: [{ name:'整体任务', goal:'', accept:'满足《需求评价报告》的成功标准', points:'' }],
+    integration: { goal:'整理成完整成品', accept:'内容完整、格式统一、满足需求报告' },
+    final_check: { accept:'满足《需求评价报告》的成功标准' }
+  };
+}
+function planSummaryText(pj){
+  var parts = [];
+  parts.push('【' + (pj.title || '执行方案') + '】' + (pj.overview ? '\n概述：' + pj.overview : ''));
+  if (pj.flowchart) parts.push('流程：' + pj.flowchart);
+  (pj.modules || []).forEach(function(md, i){
+    parts.push('模块' + (i+1) + '：' + (md.name || '')
+      + '\n  目标：' + (md.goal || '')
+      + '\n  验收标准：' + (md.accept || '')
+      + (md.points ? '\n  内容要点：' + md.points : ''));
+  });
+  if (pj.integration) parts.push('整合：' + (pj.integration.goal || '') + '（验收：' + (pj.integration.accept || '') + '）');
+  if (pj.final_check) parts.push('整体验收标准：' + (pj.final_check.accept || ''));
+  return parts.join('\n');
+}
+// 整改包：上一版 + 失败条目 + 相关资料 + 整改指令（优先修改，结构性问题可重写）
+function revisionPack(prevText, issues, related){
+  var parts = ['【上一版内容】（请在此基础上修改，优先保留可用部分）\n' + prevText];
+  if (issues && issues.length){
+    parts.push('【评审未通过的问题条目】\n' + issues.map(function(x){
+      return '- ' + (x && x.point || '') + (x && x.suggestion ? '（修改建议：' + x.suggestion + '）' : '');
+    }).join('\n'));
+  }
+  if (related) parts.push('【相关检索资料】\n' + related);
+  parts.push('【修改要求】只针对上述问题做针对性修改，其余部分保持不动；若问题牵涉整体结构、修改比重写更费劲，可以重新生成，并在输出末尾简要说明重写原因。');
+  return parts.join('\n\n');
+}
+function flowHTML(m){
+  var nodes = (m.super && m.super.flow && m.super.flow.nodes) || [];
+  if (!nodes.length) return '';
+  var out = [];
+  for (var i=0;i<nodes.length;i++){
+    var n = nodes[i];
+    if (i) out.push('<span class="f-arrow">→</span>');
+    var ic = n.status === 'done' ? '✓' : (n.status === 'running' ? '<span class="sp-spin"></span>' : (n.status === 'retry' ? '↻' : (n.status === 'warn' ? '⚠' : '·')));
+    var extra = (n.status === 'retry' && n.tries > 1) ? ' 第' + n.tries + '次' : '';
+    out.push('<span class="f-node ' + n.status + '" title="' + escapeHtml(n.name) + '"><i class="sp-ico">' + ic + '</i>' + escapeHtml(n.name) + extra + '</span>');
+  }
+  return '<div class="sp-flow"><div class="sp-flow-head">任务流程图</div><div class="sp-flow-body">' + out.join('') + '</div></div>';
 }
 function userContentBlocks(m, includeImages){
   var blocks = [];
@@ -1249,14 +1345,22 @@ function parseScoreJson(text, threshold){
     var o = JSON.parse(t);
     if (o && typeof o.score === 'number'){
       var passVal = (typeof o.pass === 'boolean') ? o.pass : (o.score >= threshold);
-      return { score: o.score, pass: passVal, reason: o.reason || '' };
+      var issues = Array.isArray(o.issues) ? o.issues.filter(function(x){ return x && (x.point || x.suggestion); }) : [];
+      var reason = o.summary || o.reason || '';
+      if (issues.length){
+        var parts = issues.map(function(x){
+          return '- ' + (x.point || '') + (x.suggestion ? '（建议：' + x.suggestion + '）' : '');
+        });
+        reason = (reason ? reason + '\n' : '') + parts.join('\n');
+      }
+      return { score: o.score, pass: passVal, reason: reason, issues: issues };
     }
   } catch(e){}
   var m = t.match(/"score"\s*:\s*(\d+)/);
   if (m){
     var p = t.match(/"pass"\s*:\s*(true|false)/);
     var pass = p ? p[1] === 'true' : (+m[1] >= threshold);
-    return { score: +m[1], pass: pass, reason: t.slice(0, 200) };
+    return { score: +m[1], pass: pass, reason: t.slice(0, 200), issues: [] };
   }
   return null;
 }
@@ -1370,7 +1474,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     ctx.totalUsage.total_tokens += u.total_tokens || 0;
     if (u.completion_tokens_details) ctx.totalUsage.completion_tokens_details.reasoning_tokens += u.completion_tokens_details.reasoning_tokens || 0;
   }
-  var STAGE_IDS = ['req','search1','plan','planScore','search2','verify','draft','score','integrate'];
+  var STAGE_IDS = ['req','search1','plan','planScore','search2','verify','draft','score','integrate','finalCheck','output'];
 
   try {
     // ① 需求猜测
@@ -1390,31 +1494,41 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     } catch(e){ setArtifact('search1', '（检索失败：' + e.message + '）'); }
     addUsage(search1Res && search1Res.usage); setStage(1, 'done');
 
-    // ③④ 方案制定 + 方案评分（重做循环，取最优）
-    var bestPlan = { content:'', score:-1, reason:'' };
-    var planFeedback = '';
+    // ③④ 方案制定（结构化 JSON + 流程图）+ 方案评分（整改式重做，取最优）
+    var bestPlan = { pj: null, text: '', score: -1, issues: [], reason: '' };
+    var planPrevText = '', planIssues = null;
     var planScores = [];
     for (var t = 1; t <= maxRetry + 1; t++){
       setStage(2, t > 1 ? 'retry' : 'running', t);
-      var pSys = env + '\n\n你是方案架构师。基于《需求评价报告》与检索摘要，制定一份执行方案，包含：\n1. 目标\n2. 执行步骤\n3. 内容大纲/要点\n4. 质量标准\n5. 风险与规避。\n只输出方案本身。';
-      var pUser = '《需求评价报告》：\n' + reqRes.content + '\n\n检索摘要：\n' + (asst.super.artifacts.search1 || '（无）') + (planFeedback ? '\n\n【上次评审未通过，请据此改进】\n' + planFeedback : '');
-      var planRes = await superStageCall([{ role:'system', content: pSys }, { role:'user', content: pUser }], { model: superStageModel('plan', hasImages), signal: ctrl.signal });
-      setArtifact('plan', planRes.content); addUsage(planRes.usage);
+      var pSys = env + '\n\n你是方案架构师。基于《需求评价报告》与检索摘要，制定一份执行方案，输出 JSON 对象（不要输出其他内容）：\n{"title":"方案标题","overview":"一句话概述","flowchart":"文字流程：模块一 → 模块二 → … → 内容整合 → 整体验收 → 输出","modules":[{"name":"模块名称","goal":"模块目标","accept":"模块验收标准","points":"内容要点"}],"integration":{"goal":"整合目标","accept":"整合验收标准"},"final_check":{"accept":"整体验收标准"}}\n要求：把任务拆分为 2~6 个可独立验收的模块，按执行顺序排列；长任务必须拆分，简单任务可只分 1 个模块；每个模块的验收标准要具体可验证。';
+      var pUser = '《需求评价报告》：\n' + reqRes.content + '\n\n检索摘要：\n' + (asst.super.artifacts.search1 || '（无）')
+        + (planPrevText ? '\n\n' + revisionPack(planPrevText, planIssues, null) : '');
+      var planRes = await superStageCall([{ role:'system', content: pSys }, { role:'user', content: pUser }], { model: superStageModel('plan', hasImages), json: true, signal: ctrl.signal });
+      planPrevText = planRes.content;
+      var pj = parsePlanJson(planRes.content) || fallbackPlan();
+      setArtifact('plan', planSummaryText(pj)); addUsage(planRes.usage);
       setStage(2, 'done');
       setStage(3, 'running', t);
-      var scSys = env + '\n\n你是方案评审员。对照《需求评价报告》评审执行方案是否满足需求，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}';
+      var scSys = env + '\n\n你是方案评审员。对照《需求评价报告》评审执行方案，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：模块拆分是否合理、验收标准是否可验证、流程是否完整、是否满足需求报告。';
       var scRes = await superStageCall([{ role:'system', content: scSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
       addUsage(scRes.usage);
       var p = parseScoreJson(scRes.content, threshold);
-      if (!p) p = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）' };
+      if (!p) p = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
       planScores.push('第' + t + '次：得分 ' + p.score + (p.pass ? '，通过' : '，未通过') + (p.reason ? '\n—— ' + p.reason : ''));
       setArtifact('planScores', planScores);
-      if (p.score > bestPlan.score) bestPlan = { content: planRes.content, score: p.score, reason: p.reason || '' };
+      if (p.score > bestPlan.score) bestPlan = { pj: pj, text: planPrevText, score: p.score, issues: p.issues || [], reason: p.reason || '' };
       setStage(3, 'done');
       if (p.pass || t > maxRetry) break;
-      planFeedback = p.reason || '未说明原因';
+      planIssues = (p.issues && p.issues.length) ? p.issues : [{ point: p.reason || '方案需改进', suggestion: '' }];
     }
-    var plan = bestPlan.content;
+    var planJson = bestPlan.pj;
+    var planSummary = planSummaryText(planJson);
+    // 初始化任务流程图（模块 → 整合 → 整体验收 → 输出）
+    asst.super.flow = {
+      nodes: planJson.modules.map(function(md){ return { name: md.name || '模块', status: 'pending', tries: 0 }; })
+        .concat([ { name:'内容整合', status:'pending', tries:0 }, { name:'整体验收', status:'pending', tries:0 }, { name:'输出', status:'pending', tries:0 } ])
+    };
+    updateSuperUI(asst);
 
     // ⑤ 深度检索（high 1 轮 / max 2 轮交叉验证）
     setStage(4, 'running', 1);
@@ -1423,7 +1537,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       var s2Sys, s2User;
       if (r === 1){
         s2Sys = env + '\n\n你是信息检索助手。请联网搜索执行方案所需的详细信息，**优先查找相似案例与参考实现**，输出《资料汇编》：关键信息分条列出并注明来源标题。';
-        s2User = '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan;
+        s2User = '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planSummary;
       } else {
         s2Sys = env + '\n\n请针对上一轮《资料汇编》中的关键事实做交叉验证：另找独立来源核对，指出哪些可信、哪些存疑，并补充来源。';
         s2User = '上一轮《资料汇编》：\n' + search2Text;
@@ -1445,44 +1559,113 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     // ⑥ 真实性核验
     setStage(5, 'running', 1);
     var vSys = env + '\n\n你是事实核查员。请基于《资料汇编》与来源列表核对关键事实的可靠性，剔除存疑或矛盾内容，输出《核验报告》：\n1. 可信要点\n2. 存疑项及处理建议\n3. 修正后的关键信息。';
-    var vRes = await superStageCall([{ role:'system', content: vSys }, { role:'user', content: '执行方案：\n' + plan + '\n\n《资料汇编》：\n' + search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }], { model: superStageModel('verify', hasImages), signal: ctrl.signal });
+    var vRes = await superStageCall([{ role:'system', content: vSys }, { role:'user', content: '执行方案：\n' + planSummary + '\n\n《资料汇编》：\n' + search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }], { model: superStageModel('verify', hasImages), signal: ctrl.signal });
     setArtifact('verify', vRes.content); addUsage(vRes.usage); setStage(5, 'done');
 
-    // ⑦⑧ 内容制作 + 内容评分（重做循环，取最高分）
-    var bestDraft = { content:'', score:-1, reason:'' };
-    var draftFeedback = '';
-    var draftScores = [];
-    for (var dt = 1; dt <= maxRetry + 1; dt++){
-      setStage(6, dt > 1 ? 'retry' : 'running', dt);
-      var dSys = env + '\n\n你是内容制作专家。请严格按《需求评价报告》与执行方案制作最终成品，只使用《核验报告》中可信的资料，保证内容准确完整、达到成功标准。直接输出成品内容，不要解释过程。';
-      var dUser = '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n《核验报告》：\n' + vRes.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) + (draftFeedback ? '\n\n【上一版评审意见（得分未达标），请据此改进】\n' + draftFeedback : '');
-      var dMsgs = [{ role:'system', content: dSys }, { role:'user', content: dUser }];
-      if (hasImages) dMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
-      var dRes = await superStageCall(dMsgs, { model: superStageModel('draft', hasImages), signal: ctrl.signal });
-      setArtifact('draft', dRes.content); addUsage(dRes.usage);
-      setStage(6, 'done');
-      setStage(7, 'running', dt);
-      var cSys = env + '\n\n你是内容评审员。对照《需求评价报告》与执行方案评审成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"reason": "简评；若不通过，说明具体不足"}。评审维度包括：内容准确完整、达到成功标准、排版清晰易读（标题层级/空行/列表/表格/代码块/公式均规范，无错乱样式）。';
-      var cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + dRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
-      addUsage(cRes.usage);
-      var cp = parseScoreJson(cRes.content, threshold);
-      if (!cp) cp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）' };
-      draftScores.push('第' + dt + '次：得分 ' + cp.score + (cp.pass ? '，通过' : '，未通过') + (cp.reason ? '\n—— ' + cp.reason : ''));
-      setArtifact('draftScores', draftScores);
-      if (cp.score > bestDraft.score) bestDraft = { content: dRes.content, score: cp.score, reason: cp.reason || '' };
-      setStage(7, 'done');
-      if (cp.pass || dt > maxRetry) break;
-      draftFeedback = cp.reason || '未说明原因';
+    // ⑦⑧ 逐模块制作-验收循环（整改式重做，通过后进入下一模块）
+    var modResults = [];
+    var completedText = '';
+    var relatedMat = truncText(search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)), 4000);
+    for (var mi = 0; mi < planJson.modules.length; mi++){
+      var md = planJson.modules[mi];
+      asst.super.flow.nodes[mi].status = 'running'; asst.super.flow.nodes[mi].tries = 1;
+      updateSuperUI(asst);
+      setStage(6, 'running', mi + 1);
+      var bestMod = { content:'', score:-1, issues:[], reason:'' };
+      var modPrev = '', modIssues = null;
+      var modScores = [];
+      for (var mt = 1; mt <= maxRetry + 1; mt++){
+        if (mt > 1){
+          asst.super.flow.nodes[mi].status = 'retry'; asst.super.flow.nodes[mi].tries = mt;
+          setStage(6, 'retry', mt);
+        }
+        var dSys = env + '\n\n你是模块制作专家。请完成当前模块的制作任务，只输出该模块的成品内容，不要输出其他模块的内容，不要解释过程。';
+        var dUser = '《需求评价报告》：\n' + reqRes.content
+          + '\n\n执行方案：\n' + planSummary
+          + '\n\n《核验报告》：\n' + vRes.content
+          + (completedText ? '\n\n【已完成模块的产出】（供衔接参考）\n' + completedText : '')
+          + '\n\n【当前模块】\n名称：' + (md.name || '')
+          + '\n目标：' + (md.goal || '')
+          + '\n内容要点：' + (md.points || '')
+          + '\n验收标准：' + (md.accept || '')
+          + (modPrev ? '\n\n' + revisionPack(modPrev, modIssues, relatedMat) : '');
+        var dMsgs = [{ role:'system', content: dSys }, { role:'user', content: dUser }];
+        if (hasImages && mi === 0) dMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
+        var dRes = await superStageCall(dMsgs, { model: superStageModel('draft', hasImages), signal: ctrl.signal });
+        modPrev = dRes.content; addUsage(dRes.usage);
+        setStage(6, 'done');
+        setStage(7, 'running', mt);
+        var cSys = env + '\n\n你是模块评审员。对照该模块的验收标准评审模块产出，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：满足模块目标与验收标准、内容准确、排版清晰。';
+        var cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '【模块】\n' + (md.name || '') + '\n目标：' + (md.goal || '') + '\n验收标准：' + (md.accept || '') + '\n\n【模块产出】\n' + dRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
+        addUsage(cRes.usage);
+        var cp = parseScoreJson(cRes.content, threshold);
+        if (!cp) cp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
+        modScores.push('第' + mt + '次：得分 ' + cp.score + (cp.pass ? '，通过' : '，未通过') + (cp.reason ? '\n—— ' + cp.reason : ''));
+        if (cp.score > bestMod.score) bestMod = { content: dRes.content, score: cp.score, issues: cp.issues || [], reason: cp.reason || '' };
+        setStage(7, 'done');
+        if (cp.pass || mt > maxRetry) break;
+        modIssues = (cp.issues && cp.issues.length) ? cp.issues : [{ point: cp.reason || '需改进', suggestion: '' }];
+      }
+      var modPassed = bestMod.score >= threshold;
+      asst.super.flow.nodes[mi].status = modPassed ? 'done' : 'warn';
+      modResults.push({ name: md.name || ('模块' + (mi+1)), goal: md.goal || '', accept: md.accept || '', content: bestMod.content, score: bestMod.score, scores: modScores, passed: modPassed });
+      setArtifact('modules', modResults);
+      completedText += '\n\n【已完成模块：' + (md.name || '') + '】\n' + truncText(bestMod.content, 4000);
+      updateSuperUI(asst);
     }
-    setArtifact('draftBest', bestDraft.content);
 
-    // ⑨ 输出整合（流式输出最终结果）
-    setStage(8, 'running', 1);
-    var iSys = env + '\n\n你是输出编辑。请把成品整合为最终回答：内容以成品为准，按《需求评价报告》检查完整性，用清晰的 Markdown 排版；成品末尾如有参考来源，请保留为"参考来源"列表。\n\n输出格式要求（必须遵守）：\n1. 使用多级标题与分点组织内容，层级清晰，禁止大段连续文字；\n2. 段落之间空行分隔，关键信息优先用列表或表格；\n3. 代码块必须注明语言；\n4. 公式按《数学公式排版规范》书写；\n5. 参考来源逐条换行列出（每条一行：序号 + 标题 + 链接），不要把网页中的表格或样式标签粘进正文；\n6. 输出前自查一遍：确认所有标题、列表、表格、代码块、公式均可正常渲染，无错乱标记。\n直接输出最终回答正文。';
-    var iMsgs = [{ role:'system', content: iSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + plan + '\n\n成品内容：\n' + bestDraft.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }];
+    // ⑨ 内容整合 + ⑩ 整体验收（整改式重做，取最优）
+    var integIdx = planJson.modules.length;
+    var bestInteg = { content:'', score:-1, issues:[], reason:'' };
+    var integPrev = '', integIssues = null;
+    var finalScores = [];
+    var modsText = modResults.map(function(r){ return '【' + r.name + '】\n' + r.content; }).join('\n\n');
+    for (var it = 1; it <= maxRetry + 1; it++){
+      if (it === 1){
+        asst.super.flow.nodes[integIdx].status = 'running'; asst.super.flow.nodes[integIdx].tries = 1;
+        setStage(8, 'running', 1);
+      } else {
+        asst.super.flow.nodes[integIdx].status = 'retry'; asst.super.flow.nodes[integIdx].tries = it;
+        setStage(8, 'retry', it);
+      }
+      var itSys = env + '\n\n你是内容整合专家。请把各模块的产出整合为一份完整成品：统一格式与风格、补充模块间过渡、消除重复与冲突，达到整合验收标准。直接输出整合后的完整成品。';
+      var itUser = '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planSummary
+        + '\n\n整合验收标准：\n' + ((planJson.integration && planJson.integration.accept) || '内容完整、格式统一')
+        + '\n\n各模块产出：\n' + modsText
+        + (integPrev ? '\n\n' + revisionPack(integPrev, integIssues, null) : '');
+      var integRes = await superStageCall([{ role:'system', content: itSys }, { role:'user', content: itUser }], { model: superStageModel('integrate', hasImages), signal: ctrl.signal });
+      integPrev = integRes.content; addUsage(integRes.usage);
+      setStage(8, 'done');
+      setStage(9, 'running', it);
+      asst.super.flow.nodes[integIdx + 1].status = 'running'; asst.super.flow.nodes[integIdx + 1].tries = it;
+      var fcSys = env + '\n\n你是整体验收评审员。对照《需求评价报告》与整体验收标准评审整合成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：内容完整准确、各模块衔接自然、排版清晰、达到整体验收标准。';
+      var fcRes = await superStageCall([{ role:'system', content: fcSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n整体验收标准：\n' + ((planJson.final_check && planJson.final_check.accept) || '') + '\n\n整合成品：\n' + integRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
+      addUsage(fcRes.usage);
+      var fp = parseScoreJson(fcRes.content, threshold);
+      if (!fp) fp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
+      finalScores.push('第' + it + '次：得分 ' + fp.score + (fp.pass ? '，通过' : '，未通过') + (fp.reason ? '\n—— ' + fp.reason : ''));
+      if (fp.score > bestInteg.score) bestInteg = { content: integRes.content, score: fp.score, issues: fp.issues || [], reason: fp.reason || '' };
+      setStage(9, 'done');
+      asst.super.flow.nodes[integIdx + 1].status = 'pending';
+      if (fp.pass || it > maxRetry) break;
+      integIssues = (fp.issues && fp.issues.length) ? fp.issues : [{ point: fp.reason || '需改进', suggestion: '' }];
+    }
+    var integPassed = bestInteg.score >= threshold;
+    asst.super.flow.nodes[integIdx].status = integPassed ? 'done' : 'warn';
+    asst.super.flow.nodes[integIdx + 1].status = integPassed ? 'done' : 'warn';
+    setArtifact('integration', bestInteg.content);
+    setArtifact('finalScores', finalScores);
+    updateSuperUI(asst);
+
+    // ⑪ 输出排版（流式输出最终结果）
+    setStage(10, 'running', 1);
+    asst.super.flow.nodes[integIdx + 2].status = 'running'; asst.super.flow.nodes[integIdx + 2].tries = 1;
+    updateSuperUI(asst);
+    var iSys = env + '\n\n你是输出编辑。请把整合成品排版为最终回答：内容以整合成品为准，按《需求评价报告》检查完整性，用清晰的 Markdown 排版；成品末尾如有参考来源，请保留为"参考来源"列表。\n\n输出格式要求（必须遵守）：\n1. 使用多级标题与分点组织内容，层级清晰，禁止大段连续文字；\n2. 段落之间空行分隔，关键信息优先用列表或表格；\n3. 代码块必须注明语言；\n4. 公式按《数学公式排版规范》书写；\n5. 参考来源逐条换行列出（每条一行：序号 + 标题 + 链接），不要把网页中的表格或样式标签粘进正文；\n6. 输出前自查一遍：确认所有标题、列表、表格、代码块、公式均可正常渲染，无错乱标记。\n直接输出最终回答正文。';
+    var iMsgs = [{ role:'system', content: iSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planSummary + '\n\n整合成品：\n' + bestInteg.content + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }];
     if (hasImages) iMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
     var iBody = {
-      model: superStageModel('integrate', hasImages),
+      model: superStageModel('output', hasImages),
       messages: iMsgs,
       stream: true,
       thinking: { type: 'enabled' },
@@ -1500,7 +1683,8 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       throw new Error(apiErrorMessage(resp9.status, errJson9));
     }
     await consumeStream(resp9, asst);
-    setStage(8, 'done');
+    setStage(10, 'done');
+    asst.super.flow.nodes[integIdx + 2].status = 'done';
 
     asst.status = 'done';
     asst.sources = ctx.allSources.slice(0, 10).map(function(s){ return { url: s.url, title: s.title }; });
@@ -1510,6 +1694,10 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     var cur = asst.super.stages;
     for (var i=0;i<cur.length;i++){
       if (cur[i].status === 'running' || cur[i].status === 'retry') cur[i].status = 'error';
+    }
+    var fNodes = (asst.super.flow && asst.super.flow.nodes) || [];
+    for (var fi=0;fi<fNodes.length;fi++){
+      if (fNodes[fi].status === 'running' || fNodes[fi].status === 'retry') fNodes[fi].status = 'error';
     }
     updateSuperUI(asst);
     throw e;
@@ -1543,16 +1731,29 @@ function superArtifactsHTML(m){
     ['plan', '执行方案（最佳）', a.plan],
     ['planScores', '方案评审记录', Array.isArray(a.planScores) && a.planScores.length ? a.planScores.join('\n\n') : ''],
     ['search2', '资料汇编', a.search2],
-    ['verify', '真实性核验报告', a.verify],
-    ['draftBest', '成品（最佳）', a.draftBest],
-    ['draftScores', '内容评审记录', Array.isArray(a.draftScores) && a.draftScores.length ? a.draftScores.join('\n\n') : '']
+    ['verify', '真实性核验报告', a.verify]
   ];
+  var mods = Array.isArray(a.modules) ? a.modules : [];
+  for (var mi2 = 0; mi2 < mods.length; mi2++){
+    var r = mods[mi2];
+    var rec = Array.isArray(r.scores) && r.scores.length ? r.scores.join('\n\n') : '';
+    defs.push(['mod_' + mi2, r.name + '（得分 ' + r.score + (r.passed ? '，通过' : '，未达标）'), (r.content || '') + (rec ? '\n\n【评审记录】\n' + rec : '')]);
+  }
+  defs.push(['integration', '整合成品（最佳）', a.integration]);
+  defs.push(['finalScores', '整体验收记录', Array.isArray(a.finalScores) && a.finalScores.length ? a.finalScores.join('\n\n') : '']);
   var curIdx = m.status === 'streaming' ? currentRunningIdx(sts) : -1;
   var out = [];
   for (var i=0;i<defs.length;i++){
     var title = defs[i][1], content = defs[i][2];
     if (!content) continue;
-    var open = curIdx >= 0 && ((defs[i][0] === 'req' && curIdx === 0) || (defs[i][0] === 'search1' && curIdx === 1) || (defs[i][0] === 'plan' && curIdx === 2) || (defs[i][0] === 'planScores' && curIdx === 3) || (defs[i][0] === 'search2' && curIdx === 4) || (defs[i][0] === 'verify' && curIdx === 5) || (defs[i][0] === 'draft' && curIdx === 6) || (defs[i][0] === 'draftBest' && curIdx === 6) || (defs[i][0] === 'draftScores' && curIdx === 7));
+    var key = defs[i][0];
+    var isLastMod = key === 'mod_' + (mods.length - 1);
+    var open = curIdx >= 0 && (
+      (key === 'req' && curIdx === 0) || (key === 'search1' && curIdx === 1) || (key === 'plan' && curIdx === 2) || (key === 'planScores' && curIdx === 3)
+      || (key === 'search2' && curIdx === 4) || (key === 'verify' && curIdx === 5)
+      || (isLastMod && (curIdx === 6 || curIdx === 7))
+      || (key === 'integration' && curIdx === 8) || (key === 'finalScores' && curIdx === 9)
+    );
     out.push('<div class="sp-art' + (open ? ' open' : '') + '"><button class="sp-art-head" type="button"><span>' + escapeHtml(title) + '</span><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 6l5 5 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="sp-art-body">' + escapeHtml(String(content)) + '</div></div>');
   }
   return out.join('');
@@ -1565,6 +1766,13 @@ function updateSuperUI(m){
     el.headEl.innerHTML = '<span class="sdot' + (done ? '' : ' run') + '"></span>' + (done ? '流水线完成 · 用时见下方' : '超级思考流水线运行中（约 1~3 分钟）');
   }
   if (el.stepsEl) el.stepsEl.innerHTML = superChipsHTML(m);
+  var fh = flowHTML(m);
+  if (el.flowEl){
+    el.flowEl.innerHTML = fh;
+  } else if (fh && el.stepsEl && el.stepsEl.parentNode){
+    el.stepsEl.insertAdjacentHTML('afterend', fh);
+    el.flowEl = el.stepsEl.parentNode.querySelector('.sp-flow');
+  }
   if (el.artsEl) el.artsEl.innerHTML = superArtifactsHTML(m);
   if (nearBottom()) scrollToBottom(false);
 }
@@ -1576,6 +1784,7 @@ function superMessageHTML(m, name){
     + '<div class="super-box">'
     + '<div class="super-head">' + (m.status === 'streaming' ? '<span class="sdot run"></span>超级思考流水线运行中（约 1~3 分钟）' : '<span class="sdot"></span>流水线完成') + '</div>'
     + '<div class="super-steps">' + superChipsHTML(m) + '</div>'
+    + (m.super && m.super.flow && m.super.flow.nodes.length ? flowHTML(m) : '')
     + '<div class="super-arts">' + superArtifactsHTML(m) + '</div>'
     + '</div>';
   if (m.status === 'error' && !m.content){
@@ -1687,6 +1896,7 @@ function renderMessages(){
         liveEls[m.id] = {
           stepsEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-steps'),
           artsEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-arts'),
+          flowEl: inner.querySelector('.msg[data-id="'+m.id+'"] .sp-flow'),
           headEl: inner.querySelector('.msg[data-id="'+m.id+'"] .super-head'),
           contentEl: inner.querySelector('.msg[data-id="'+m.id+'"] .msg-content')
         };
