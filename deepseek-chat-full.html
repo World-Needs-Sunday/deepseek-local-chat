@@ -1425,7 +1425,56 @@ function mergeSources(base, add){
   return out.slice(0, 16);
 }
 
+/* ---------- 调用可靠性：超时 / 重试 / 退避 / 熔断 ---------- */
+var CB = {}; // 熔断器状态：{ stageId: { fails, openUntil } }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function backoffDelay(retry){
+  var base = 2000 * Math.pow(2, retry);
+  return Math.random() * Math.min(20000, base); // full jitter（AWS 公式）
+}
+function isUserAbort(signal){ return !!(signal && signal.aborted); }
+function isRetryableStatus(st){ return st === 429 || st >= 500; }
+function combineSignal(signal, timeoutMs){
+  try {
+    if (AbortSignal.timeout && AbortSignal.any){
+      return signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+    }
+  } catch(e){}
+  if (AbortSignal.timeout && !signal) return AbortSignal.timeout(timeoutMs);
+  var ctrl = new AbortController();
+  var t = setTimeout(function(){ ctrl.abort(new Error('请求超时（' + timeoutMs + 'ms）')); }, timeoutMs);
+  if (signal){
+    if (signal.aborted){ clearTimeout(t); ctrl.abort(signal.reason); }
+    else signal.addEventListener('abort', function(){ clearTimeout(t); ctrl.abort(signal.reason); }, { once: true });
+  }
+  return ctrl.signal;
+}
+function circuitFail(stageId){
+  var c = CB[stageId] || (CB[stageId] = { fails: 0, openUntil: 0 });
+  c.fails++;
+  if (c.fails >= 3){ c.openUntil = Date.now() + 60000; c.fails = 0; }
+}
+function circuitOk(stageId){
+  var c = CB[stageId];
+  if (c){ c.fails = 0; c.openUntil = 0; }
+}
+function circuitOpen(stageId){
+  var c = CB[stageId];
+  return !!(c && c.openUntil > Date.now());
+}
+// 检查文本是否为合法 JSON（剥离围栏后），失败返回错误信息
+function firstJsonError(text){
+  var t = String(text || '').replace(/^```(json)?\s*/,'').replace(/```\s*$/,'').trim();
+  try { JSON.parse(t); return null; } catch(e){ return (e && e.message) || '未知解析错误'; }
+}
+
 async function superStageCall(messages, cfg){
+  var stageId = cfg.stageId || 'generic';
+  if (circuitOpen(stageId)){
+    var cErr = new Error('【已熔断】该环节近期连续失败，已暂停调用约 60 秒');
+    cErr.circuit = true;
+    throw cErr;
+  }
   var body = {
     model: cfg.model,
     messages: messages,
@@ -1436,30 +1485,101 @@ async function superStageCall(messages, cfg){
   if (cfg.json) body.response_format = { type: 'json_object' };
   if (cfg.tools) body.tools = cfg.tools;
   var headers = { 'Content-Type':'application/json', 'Authorization':'Bearer ' + settings.apiKey };
-  var resp = await fetch(API_BASE + '/chat/completions', {
-    method:'POST', headers: headers, body: JSON.stringify(body), signal: cfg.signal
-  });
-  if (!resp.ok && cfg.json){
-    // json 模式可能不被支持，去掉后重试一次
-    delete body.response_format;
-    var r2 = await fetch(API_BASE + '/chat/completions', {
-      method:'POST', headers: headers, body: JSON.stringify(body), signal: cfg.signal
-    });
-    if (r2.ok){
-      var d2 = await r2.json();
-      var m2 = d2.choices && d2.choices[0] && d2.choices[0].message;
-      return { content: (m2 && m2.content) || '', annotations: m2 && m2.annotations, server_tool_calls: m2 && m2.server_tool_calls, usage: d2.usage };
+  var timeoutMs = cfg.timeoutMs || 180000;
+  var data = null, resp = null, lastErr = null;
+
+  // HTTP 层：最多 2 次尝试（首次 + 1 次重试），仅对可重试错误重试
+  for (var attempt = 0; attempt < 2; attempt++){
+    if (attempt > 0){
+      if (isUserAbort(cfg.signal)) throw lastErr || new DOMException('aborted', 'AbortError');
+      await sleep(backoffDelay(attempt - 1));
+      if (isUserAbort(cfg.signal)) throw lastErr || new DOMException('aborted', 'AbortError');
     }
-    resp = r2;
-  }
-  if (!resp.ok){
+    try {
+      resp = await fetch(API_BASE + '/chat/completions', {
+        method:'POST', headers: headers, body: JSON.stringify(body), signal: combineSignal(cfg.signal, timeoutMs)
+      });
+    } catch(e){
+      if (isUserAbort(cfg.signal)){ circuitFail(stageId); throw e; }
+      lastErr = new Error('请求失败或超时：' + (e && e.message ? e.message : e));
+      continue;
+    }
+    if (resp.ok){
+      try { data = await resp.json(); }
+      catch(e){
+        lastErr = new Error('响应解析失败：' + (e && e.message ? e.message : e));
+        continue;
+      }
+      break;
+    }
+    var status = resp.status;
     var errJson = null;
     try { errJson = await resp.json(); } catch(e){}
-    throw new Error(apiErrorMessage(resp.status, errJson));
+    if (status === 400 && cfg.json && attempt === 0 && body.response_format){
+      // json 模式可能不被支持：去掉 response_format 后重试一次
+      delete body.response_format;
+      lastErr = new Error(apiErrorMessage(status, errJson));
+      continue;
+    }
+    if (status === 401 || status === 402 || status === 403 || status === 400 || status === 404 || status === 422){
+      circuitFail(stageId);
+      throw new Error(apiErrorMessage(status, errJson));
+    }
+    if (isRetryableStatus(status)){
+      lastErr = new Error(apiErrorMessage(status, errJson));
+      var raSec = 0;
+      try {
+        var ra = resp.headers.get('retry-after');
+        if (ra) raSec = parseInt(ra, 10);
+      } catch(e){}
+      if (raSec > 0) await sleep(Math.min(raSec, 30) * 1000); // Retry-After 优先，上限 30s
+      continue;
+    }
+    circuitFail(stageId);
+    throw new Error(apiErrorMessage(status, errJson));
   }
-  var data = await resp.json();
+  if (!data){
+    circuitFail(stageId);
+    throw lastErr || new Error('请求失败');
+  }
   var msg = data.choices && data.choices[0] && data.choices[0].message;
-  return { content: (msg && msg.content) || '', annotations: msg && msg.annotations, server_tool_calls: msg && msg.server_tool_calls, usage: data.usage };
+  var content = (msg && msg.content) || '';
+
+  // JSON 层：内容不是合法 JSON 时，带具体校验错误重问一次（自纠正）
+  if (cfg.json){
+    var errInfo = firstJsonError(content);
+    if (errInfo){
+      var fixMsgs = messages.concat([
+        { role:'assistant', content: truncText(content, 4000) },
+        { role:'user', content: '你上面的输出不是合法的 JSON（解析错误：' + errInfo + '）。请重新输出，只输出一个合法的 JSON 对象，不要任何解释或代码围栏。' }
+      ]);
+      var fixBody = { model: body.model, messages: fixMsgs, stream: false, thinking: body.thinking, reasoning_effort: body.reasoning_effort };
+      if (body.response_format) fixBody.response_format = body.response_format;
+      if (body.tools) fixBody.tools = body.tools;
+      var fixResp = null;
+      try {
+        fixResp = await fetch(API_BASE + '/chat/completions', {
+          method:'POST', headers: headers, body: JSON.stringify(fixBody), signal: combineSignal(cfg.signal, timeoutMs)
+        });
+      } catch(e){
+        fixResp = null;
+      }
+      if (fixResp && fixResp.ok){
+        try {
+          var fd = await fixResp.json();
+          var fm = fd.choices && fd.choices[0] && fd.choices[0].message;
+          var fc = (fm && fm.content) || '';
+          if (!firstJsonError(fc)){
+            circuitOk(stageId);
+            return { content: fc, annotations: fm.annotations, server_tool_calls: fm.server_tool_calls, usage: fd.usage, repaired: true };
+          }
+        } catch(e){}
+      }
+      // 自纠正失败：返回原内容，由调用方 parseScoreJson/parsePlanJson 走降级
+    }
+  }
+  circuitOk(stageId);
+  return { content: content, annotations: msg && msg.annotations, server_tool_calls: msg && msg.server_tool_calls, usage: data.usage, repaired: false };
 }
 
 async function runSuperPipeline(conv, userMsg, asst, ctrl){
@@ -1493,7 +1613,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     // ① 需求猜测
     setStage(0, 'running', 1);
     var reqSys = env + '\n\n你是需求分析专家。请根据用户的问题' + (hasImages ? '（可能包含图片，请结合图片内容）' : '') + '推测用户的真实需求与深层意图，输出《需求评价报告》，包含：\n1. 核心需求\n2. 隐含需求\n3. 成功标准（尽量具体、可验证；优先给出可在代码层面自检或逻辑推理验证的标准，例如无报错、逻辑正确、含自测用例、静态检查通过，不要依赖真实设备实测、性能录制、截图等无法自动执行的验证）\n4. 约束与边界\n5. 期望输出形式。\n只输出报告本身，不要执行任务。';
-    var reqRes = await superStageCall([{ role:'system', content: reqSys }, { role:'user', content: userContentBlocks(userMsg, true) }], { model: superStageModel('req', hasImages), signal: ctrl.signal });
+    var reqRes = await superStageCall([{ role:'system', content: reqSys }, { role:'user', content: userContentBlocks(userMsg, true) }], { model: superStageModel('req', hasImages), stageId: 'req', signal: ctrl.signal });
     setArtifact('req', reqRes.content); addUsage(reqRes.usage); setStage(0, 'done');
 
     // ② 初步检索（联网，优先相似案例）
@@ -1501,7 +1621,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     var search1Res = null;
     try {
       var s1Sys = env + '\n\n你是信息检索助手。请联网搜索与《需求评价报告》相关的资料，**优先查找网上相似的案例、范例、教程、参考实现**，并对检索结果做摘要整理：分条列出找到的相似案例与关键信息，注明来源标题。';
-      search1Res = await superStageCall([{ role:'system', content: s1Sys }, { role:'user', content: '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content }], { model: 'deepseek-flash', tools: WEB_TOOL, signal: ctrl.signal });
+      search1Res = await superStageCall([{ role:'system', content: s1Sys }, { role:'user', content: '原始问题：\n' + userTextOf(userMsg) + '\n\n《需求评价报告》：\n' + reqRes.content }], { model: 'deepseek-flash', tools: WEB_TOOL, stageId: 'search1', signal: ctrl.signal });
       setArtifact('search1', search1Res.content);
       ctx.allSources = mergeSources(ctx.allSources, extractSources(search1Res));
     } catch(e){ setArtifact('search1', '（检索失败：' + e.message + '）'); }
@@ -1516,17 +1636,20 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       var pSys = env + '\n\n你是方案架构师。基于《需求评价报告》与检索摘要，制定一份执行方案，输出 JSON 对象（不要输出其他内容）：\n{"title":"方案标题","overview":"一句话概述","flowchart":"文字流程：模块一 → 模块二 → … → 内容整合 → 整体验收 → 输出","modules":[{"name":"模块名称","goal":"模块目标","accept":"模块验收标准","points":"内容要点"}],"integration":{"goal":"整合目标","accept":"整合验收标准"},"final_check":{"accept":"整体验收标准"}}\n要求：把任务拆分为 2~6 个可独立验收的模块，按执行顺序排列；长任务必须拆分，简单任务可只分 1 个模块；每个模块的验收标准必须具体且可在纯代码层面自检或逻辑推理验证（如无 console 报错、逻辑正确、含自测用例、静态检查通过、参数一致性），不得把真实设备实测、性能录制、截图、长时间运行观察等无法自动执行的验证作为硬性验收项（可作为可选建议）。';
       var pUser = '《需求评价报告》：\n' + reqRes.content + '\n\n检索摘要：\n' + (asst.super.artifacts.search1 || '（无）')
         + (planPrevText ? '\n\n' + revisionPack(planPrevText, planIssues, null) : '');
-      var planRes = await superStageCall([{ role:'system', content: pSys }, { role:'user', content: pUser }], { model: superStageModel('plan', hasImages), json: true, signal: ctrl.signal });
+      var planRes = await superStageCall([{ role:'system', content: pSys }, { role:'user', content: pUser }], { model: superStageModel('plan', hasImages), json: true, stageId: 'plan', signal: ctrl.signal });
       planPrevText = planRes.content;
       var pj = parsePlanJson(planRes.content) || fallbackPlan();
       setArtifact('plan', planSummaryText(pj)); addUsage(planRes.usage);
       setStage(2, 'done');
       setStage(3, 'running', t);
       var scSys = env + '\n\n你是方案评审员。对照《需求评价报告》评审执行方案，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：模块拆分是否合理、验收标准是否可验证、流程是否完整、是否满足需求报告。';
-      var scRes = await superStageCall([{ role:'system', content: scSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planRes.content }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
-      addUsage(scRes.usage);
-      var p = parseScoreJson(scRes.content, threshold);
-      if (!p) p = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
+      var scRes = null, scoreCallErr = '';
+      try {
+        scRes = await superStageCall([{ role:'system', content: scSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n执行方案：\n' + planRes.content }], { model: 'deepseek-flash', json: true, stageId: 'planScore', signal: ctrl.signal });
+      } catch(e){ scoreCallErr = (e && e.message) || '评分调用失败'; }
+      addUsage(scRes && scRes.usage);
+      var p = parseScoreJson(scRes ? scRes.content : '', threshold);
+      if (!p) p = { score: 0, pass: false, reason: scoreCallErr || '（评分解析失败，按未通过处理）', issues: [] };
       planScores.push('第' + t + '次：得分 ' + p.score + (p.pass ? '，通过' : '，未通过') + (p.reason ? '\n—— ' + p.reason : ''));
       setArtifact('planScores', planScores);
       if (p.score > bestPlan.score) bestPlan = { pj: pj, text: planPrevText, score: p.score, issues: p.issues || [], reason: p.reason || '' };
@@ -1557,7 +1680,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       }
       var s2Res = null;
       try {
-        s2Res = await superStageCall([{ role:'system', content: s2Sys }, { role:'user', content: s2User }], { model: 'deepseek-flash', tools: WEB_TOOL, signal: ctrl.signal });
+        s2Res = await superStageCall([{ role:'system', content: s2Sys }, { role:'user', content: s2User }], { model: 'deepseek-flash', tools: WEB_TOOL, stageId: 'search2', signal: ctrl.signal });
         search2Text += (r > 1 ? '\n\n【第' + r + '轮 · 交叉验证】\n' : '') + s2Res.content;
         setArtifact('search2', search2Text);
         ctx.allSources = mergeSources(ctx.allSources, extractSources(s2Res));
@@ -1572,7 +1695,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
     // ⑥ 真实性核验
     setStage(5, 'running', 1);
     var vSys = env + '\n\n你是事实核查员。请基于《资料汇编》与来源列表核对关键事实的可靠性，剔除存疑或矛盾内容，输出《核验报告》：\n1. 可信要点\n2. 存疑项及处理建议\n3. 修正后的关键信息。';
-    var vRes = await superStageCall([{ role:'system', content: vSys }, { role:'user', content: '执行方案：\n' + planSummary + '\n\n《资料汇编》：\n' + search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }], { model: superStageModel('verify', hasImages), signal: ctrl.signal });
+    var vRes = await superStageCall([{ role:'system', content: vSys }, { role:'user', content: '执行方案：\n' + planSummary + '\n\n《资料汇编》：\n' + search2Text + '\n\n来源列表：\n' + sourcesText(ctx.allSources.slice(0, 12)) }], { model: superStageModel('verify', hasImages), stageId: 'verify', signal: ctrl.signal });
     setArtifact('verify', vRes.content); addUsage(vRes.usage); setStage(5, 'done');
 
     // ⑦⑧ 逐模块制作-验收循环（整改式重做，通过后进入下一模块）
@@ -1606,16 +1729,19 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
           + (modPrev ? '\n\n' + revisionPack(modPrev, modIssues, relatedMat) : '');
         var dMsgs = [{ role:'system', content: dSys }, { role:'user', content: dUser }];
         if (hasImages && mi === 0) dMsgs.push({ role:'user', content: userContentBlocks(userMsg, true) });
-        var dRes = await superStageCall(dMsgs, { model: superStageModel('draft', hasImages), signal: ctrl.signal });
+        var dRes = await superStageCall(dMsgs, { model: superStageModel('draft', hasImages), stageId: 'draft', signal: ctrl.signal });
         modPrev = dRes.content; addUsage(dRes.usage);
         setStage(6, 'done');
         setStage(7, 'running', mt);
         var cSys = env + '\n\n你是模块评审员。对照该模块的验收标准评审模块产出，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：满足模块目标与验收标准、内容准确、排版清晰；同时检查是否相对用户原始材料或前序模块引入了回退（如原功能被破坏、参数被改坏），有回退必须列为问题。';
         var modSmoke = isFullHtml(dRes.content) ? await runHtmlSmoke(dRes.content) : null;
-        var cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '【模块】\n' + (md.name || '') + '\n目标：' + (md.goal || '') + '\n验收标准：' + (md.accept || '') + '\n\n【前序模块行为摘要】（用于检查是否回退）\n' + truncText(completedText, 6000) + '\n\n【模块产出】\n' + dRes.content + '\n\n' + smokeReportText(modSmoke) }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
-        addUsage(cRes.usage);
-        var cp = parseScoreJson(cRes.content, threshold);
-        if (!cp) cp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
+        var cRes = null, cScoreErr = '';
+        try {
+          cRes = await superStageCall([{ role:'system', content: cSys }, { role:'user', content: '【模块】\n' + (md.name || '') + '\n目标：' + (md.goal || '') + '\n验收标准：' + (md.accept || '') + '\n\n【前序模块行为摘要】（用于检查是否回退）\n' + truncText(completedText, 6000) + '\n\n【模块产出】\n' + dRes.content + '\n\n' + smokeReportText(modSmoke) }], { model: 'deepseek-flash', json: true, stageId: 'score', signal: ctrl.signal });
+        } catch(e){ cScoreErr = (e && e.message) || '评分调用失败'; }
+        addUsage(cRes && cRes.usage);
+        var cp = parseScoreJson(cRes ? cRes.content : '', threshold);
+        if (!cp) cp = { score: 0, pass: false, reason: cScoreErr || '（评分解析失败，按未通过处理）', issues: [] };
         modScores.push('第' + mt + '次：得分 ' + cp.score + (cp.pass ? '，通过' : '，未通过') + (cp.reason ? '\n—— ' + cp.reason : ''));
         if (cp.score > bestMod.score) bestMod = { content: dRes.content, score: cp.score, issues: cp.issues || [], reason: cp.reason || '' };
         setStage(7, 'done');
@@ -1649,7 +1775,7 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
         + '\n\n整合验收标准：\n' + ((planJson.integration && planJson.integration.accept) || '内容完整、格式统一')
         + '\n\n各模块产出：\n' + modsText
         + (integPrev ? '\n\n' + revisionPack(integPrev, integIssues, null) : '');
-      var integRes = await superStageCall([{ role:'system', content: itSys }, { role:'user', content: itUser }], { model: superStageModel('integrate', hasImages), signal: ctrl.signal });
+      var integRes = await superStageCall([{ role:'system', content: itSys }, { role:'user', content: itUser }], { model: superStageModel('integrate', hasImages), stageId: 'integrate', signal: ctrl.signal });
       integPrev = integRes.content; addUsage(integRes.usage);
       setStage(8, 'done');
       setStage(9, 'running', it);
@@ -1657,10 +1783,13 @@ async function runSuperPipeline(conv, userMsg, asst, ctrl){
       var fcSys = env + '\n\n你是整体验收评审员。对照《需求评价报告》与整体验收标准评审整合成品，输出 JSON 对象：{"score": 0到100的整数,"pass": true或false,"issues": [{"point": "问题点","suggestion": "修改建议"}],"summary": "总体简评"}。评审维度：内容完整准确、各模块衔接自然、排版清晰、达到整体验收标准；同时对照用户原始材料检查核心行为是否被改坏（如关键参数、核心功能回退），有回退必须列为问题。';
       var integSmoke = isFullHtml(integRes.content) ? await runHtmlSmoke(integRes.content) : null;
       setArtifact('smoke', smokeReportText(integSmoke));
-      var fcRes = await superStageCall([{ role:'system', content: fcSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n整体验收标准：\n' + ((planJson.final_check && planJson.final_check.accept) || '') + '\n\n【用户原始材料前 20000 字符】（用于检查回退）\n' + truncText(userMat, 20000) + '\n\n整合成品：\n' + integRes.content + '\n\n' + smokeReportText(integSmoke) }], { model: 'deepseek-flash', json: true, signal: ctrl.signal });
-      addUsage(fcRes.usage);
-      var fp = parseScoreJson(fcRes.content, threshold);
-      if (!fp) fp = { score: 0, pass: false, reason: '（评分解析失败，按未通过处理）', issues: [] };
+      var fcRes = null, fcErr = '';
+      try {
+        fcRes = await superStageCall([{ role:'system', content: fcSys }, { role:'user', content: '《需求评价报告》：\n' + reqRes.content + '\n\n整体验收标准：\n' + ((planJson.final_check && planJson.final_check.accept) || '') + '\n\n【用户原始材料前 20000 字符】（用于检查回退）\n' + truncText(userMat, 20000) + '\n\n整合成品：\n' + integRes.content + '\n\n' + smokeReportText(integSmoke) }], { model: 'deepseek-flash', json: true, stageId: 'finalCheck', signal: ctrl.signal });
+      } catch(e){ fcErr = (e && e.message) || '评分调用失败'; }
+      addUsage(fcRes && fcRes.usage);
+      var fp = parseScoreJson(fcRes ? fcRes.content : '', threshold);
+      if (!fp) fp = { score: 0, pass: false, reason: fcErr || '（评分解析失败，按未通过处理）', issues: [] };
       finalScores.push('第' + it + '次：得分 ' + fp.score + (fp.pass ? '，通过' : '，未通过') + (fp.reason ? '\n—— ' + fp.reason : ''));
       if (fp.score > bestInteg.score) bestInteg = { content: integRes.content, score: fp.score, issues: fp.issues || [], reason: fp.reason || '' };
       setStage(9, 'done');
